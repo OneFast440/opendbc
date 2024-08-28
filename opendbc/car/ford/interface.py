@@ -2,7 +2,7 @@ from panda import Panda
 from opendbc.car import get_safety_config, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.ford.fordcan import CanBus
-from opendbc.car.ford.values import Ecu, FordFlags
+from opendbc.car.ford.values import Ecu, FordFlags, DBC
 from opendbc.car.interfaces import CarInterfaceBase
 
 TransmissionType = structs.CarParams.TransmissionType
@@ -12,9 +12,9 @@ class CarInterface(CarInterfaceBase):
   @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, experimental_long, docs) -> structs.CarParams:
     ret.carName = "ford"
-    ret.dashcamOnly = bool(ret.flags & FordFlags.CANFD)
+    ret.dashcamOnly = False
 
-    ret.radarUnavailable = True
+    ret.radarUnavailable = DBC[candidate]['radar'] is None
     ret.steerControlType = structs.CarParams.SteerControlType.angle
     ret.steerActuatorDelay = 0.2
     ret.steerLimitTimer = 1.0
