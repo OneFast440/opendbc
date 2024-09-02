@@ -1,4 +1,3 @@
-[project]
 name = "opendbc"
 version = "1.0.0"
 description = "CAN bus databases and tools"
@@ -7,7 +6,7 @@ authors = [{ name = "Vehicle Researcher", email = "user@comma.ai" }]
 readme = "README.md"
 requires-python = ">=3.9"
 
-urls = { "homepage" = "https://github.com/commaai/opendbc" }
+urls = { "homepage" = "https://github.com/OneFast440/opendbc" }
 
 dependencies = [
   "scons",
