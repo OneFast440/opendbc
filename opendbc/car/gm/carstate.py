@@ -5,7 +5,7 @@ from opendbc.car import create_button_events, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.common.numpy_fast import mean
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.gm.values import DBC, AccState, CanBus, CruiseButtons, STEER_THRESHOLD
+from opendbc.car.gm.values import DBC, AccState, CanBus, CruiseButtons, STEER_THRESHOLD, SDGM_CAR
 
 ButtonType = structs.CarState.ButtonEvent.Type
 TransmissionType = structs.CarParams.TransmissionType
@@ -14,7 +14,7 @@ NetworkLocation = structs.CarParams.NetworkLocation
 STANDSTILL_THRESHOLD = 10 * 0.0311 * CV.KPH_TO_MS
 
 BUTTONS_DICT = {CruiseButtons.RES_ACCEL: ButtonType.accelCruise, CruiseButtons.DECEL_SET: ButtonType.decelCruise,
-                CruiseButtons.MAIN: ButtonType.altButton3, CruiseButtons.CANCEL: ButtonType.cancel}
+                CruiseButtons.MAIN: ButtonType.mainCruise, CruiseButtons.CANCEL: ButtonType.cancel}
 
 
 class CarState(CarStateBase):
@@ -42,9 +42,6 @@ class CarState(CarStateBase):
     self.distance_button = pt_cp.vl["ASCMSteeringButton"]["DistanceButton"]
     self.buttons_counter = pt_cp.vl["ASCMSteeringButton"]["RollingCounter"]
     self.pscm_status = copy.copy(pt_cp.vl["PSCMStatus"])
-    # This is to avoid a fault where you engage while still moving backwards after shifting to D.
-    # An Equinox has been seen with an unsupported status (3), so only check if either wheel is in reverse (2)
-    self.moving_backward = (pt_cp.vl["EBCMWheelSpdRear"]["RLWheelDir"] == 2) or (pt_cp.vl["EBCMWheelSpdRear"]["RRWheelDir"] == 2)
 
     # Variables used for avoiding LKAS faults
     self.loopback_lka_steering_cmd_updated = len(loopback_cp.vl_all["ASCMLKASteeringCmd"]["RollingCounter"]) > 0
@@ -54,16 +51,20 @@ class CarState(CarStateBase):
       self.pt_lka_steering_cmd_counter = pt_cp.vl["ASCMLKASteeringCmd"]["RollingCounter"]
       self.cam_lka_steering_cmd_counter = cam_cp.vl["ASCMLKASteeringCmd"]["RollingCounter"]
 
+    # This is to avoid a fault where you engage while still moving backwards after shifting to D.
+    # An Equinox has been seen with an unsupported status (3), so only check if either wheel is in reverse (2)
+    left_whl_sign = -1 if pt_cp.vl["EBCMWheelSpdRear"]["RLWheelDir"] == 2 else 1
+    right_whl_sign = -1 if pt_cp.vl["EBCMWheelSpdRear"]["RRWheelDir"] == 2 else 1
     ret.wheelSpeeds = self.get_wheel_speeds(
-      pt_cp.vl["EBCMWheelSpdFront"]["FLWheelSpd"],
-      pt_cp.vl["EBCMWheelSpdFront"]["FRWheelSpd"],
-      pt_cp.vl["EBCMWheelSpdRear"]["RLWheelSpd"],
-      pt_cp.vl["EBCMWheelSpdRear"]["RRWheelSpd"],
+      left_whl_sign * pt_cp.vl["EBCMWheelSpdFront"]["FLWheelSpd"],
+      right_whl_sign * pt_cp.vl["EBCMWheelSpdFront"]["FRWheelSpd"],
+      left_whl_sign * pt_cp.vl["EBCMWheelSpdRear"]["RLWheelSpd"],
+      right_whl_sign * pt_cp.vl["EBCMWheelSpdRear"]["RRWheelSpd"],
     )
     ret.vEgoRaw = mean([ret.wheelSpeeds.fl, ret.wheelSpeeds.fr, ret.wheelSpeeds.rl, ret.wheelSpeeds.rr])
     ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)
     # sample rear wheel speeds, standstill=True if ECM allows engagement with brake
-    ret.standstill = ret.wheelSpeeds.rl <= STANDSTILL_THRESHOLD and ret.wheelSpeeds.rr <= STANDSTILL_THRESHOLD
+    ret.standstill = abs(ret.wheelSpeeds.rl) <= STANDSTILL_THRESHOLD and abs(ret.wheelSpeeds.rr) <= STANDSTILL_THRESHOLD
 
     if pt_cp.vl["ECMPRDNL2"]["ManualMode"] == 1:
       ret.gearShifter = self.parse_gear_shifter("T")
@@ -119,7 +120,8 @@ class CarState(CarStateBase):
     ret.cruiseState.standstill = pt_cp.vl["AcceleratorPedal2"]["CruiseState"] == AccState.STANDSTILL
     if self.CP.networkLocation == NetworkLocation.fwdCamera:
       ret.cruiseState.speed = cam_cp.vl["ASCMActiveCruiseControlStatus"]["ACCSpeedSetpoint"] * CV.KPH_TO_MS
-      ret.stockAeb = cam_cp.vl["AEBCmd"]["AEBCmdActive"] != 0
+      if self.CP.carFingerprint not in SDGM_CAR:
+        ret.stockAeb = cam_cp.vl["AEBCmd"]["AEBCmdActive"] != 0
       # openpilot controls nonAdaptive when not pcmCruise
       if self.CP.pcmCruise:
         ret.cruiseState.nonAdaptive = cam_cp.vl["ASCMActiveCruiseControlStatus"]["ACCCruiseState"] not in (2, 3)
@@ -144,10 +146,13 @@ class CarState(CarStateBase):
     messages = []
     if CP.networkLocation == NetworkLocation.fwdCamera:
       messages += [
-        ("AEBCmd", 10),
         ("ASCMLKASteeringCmd", 10),
         ("ASCMActiveCruiseControlStatus", 25),
       ]
+      if CP.carFingerprint not in SDGM_CAR:
+        messages += [
+          ("AEBCmd", 10),
+        ]
 
     return CANParser(DBC[CP.carFingerprint]["pt"], messages, CanBus.CAMERA)
 
