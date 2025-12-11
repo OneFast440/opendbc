@@ -26,7 +26,6 @@ class CarControllerParams:
   CURVATURE_MAX = 0.02  # Max curvature for steering command, m^-1
   STEER_DRIVER_ALLOWANCE = 1.0  # Driver intervention threshold, Nm
 
-
   # ANGLE_RATE_LIMIT_UP = AngleRateLimit(speed_bp=[5, 25], angle_v=[0.0006, 0.0004]) # windup limit
   # ANGLE_RATE_LIMIT_DOWN = AngleRateLimit(speed_bp=[5, 25], angle_v=[0.0006, 0.0006]) # unwind limit
   ANGLE_LIMITS: AngleSteeringLimits = AngleSteeringLimits(
@@ -52,8 +51,8 @@ class CarControllerParams:
     pass
 
 
-class FordConfig:
-  BLUECRUISE_CLUSTER_PRESENT = False
+# class FordConfig:
+#   BLUECRUISE_CLUSTER_PRESENT = False
 
 class FordSafetyFlags(IntFlag):
   LONG_CONTROL = 1
@@ -64,8 +63,8 @@ class FordFlags(IntFlag):
   # Static flags
   CANFD = 1
   ALT_STEER_ANGLE = 2
-  HEV_CLUSTER_DATA = 4
-  HEV_BATTERY_DATA = 8
+  # HEV_CLUSTER_DATA = 4
+  # HEV_BATTERY_DATA = 8
 
 
 class RADAR:

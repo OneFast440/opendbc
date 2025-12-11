@@ -8,8 +8,8 @@ from opendbc.car.ford.fordcan import CanBus
 from opendbc.car.ford.radar_interface import RadarInterface
 from opendbc.car.ford.values import CarControllerParams, DBC, Ecu, FordFlags, FordConfig, RADAR, FordSafetyFlags
 from opendbc.car.interfaces import CarInterfaceBase
-from bluepilot.params.bp_params import apply_interface_params
-from bluepilot.logger.bp_logger import debug, info, warning, error, critical
+# from bluepilot.params.bp_params import apply_interface_params
+# from bluepilot.logger.bp_logger import debug, info, warning, error, critical
 
 TransmissionType = structs.CarParams.TransmissionType
 
@@ -30,13 +30,13 @@ class CarInterface(CarInterfaceBase):
   @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:
     print("| CarParams Debug")
-    debug(f'| Candidate (interface): {candidate}', True)
+    # debug(f'| Candidate (interface): {candidate}', True)
     ret.brand = "ford"
     ret.radarUnavailable = Bus.radar not in DBC[candidate]
-    info(f'| Radar Unavailable: {ret.radarUnavailable}', True)
+    # info(f'| Radar Unavailable: {ret.radarUnavailable}', True)
 
-    FordConfig.BLUECRUISE_CLUSTER_PRESENT = any(fw.ecu == Ecu.hud for fw in car_fw) # Check for blue cruise cluster
-    info(f'| Blue Cruise Cluster Present: {FordConfig.BLUECRUISE_CLUSTER_PRESENT}', True)
+    # FordConfig.BLUECRUISE_CLUSTER_PRESENT = any(fw.ecu == Ecu.hud for fw in car_fw) # Check for blue cruise cluster
+    # info(f'| Blue Cruise Cluster Present: {FordConfig.BLUECRUISE_CLUSTER_PRESENT}', True)
 
     ret.steerControlType = structs.CarParams.SteerControlType.angle
     ret.steerActuatorDelay = 0.22
@@ -62,12 +62,12 @@ class CarInterface(CarInterfaceBase):
       cfgs.insert(0, get_safety_config(structs.CarParams.SafetyModel.noOutput))
     ret.safetyConfigs = cfgs
 
-	# For now continue to allow the user to still fall back to Ford Long
+# For now continue to allow the user to still fall back to Ford Long
     # for  CANFD platforms - in case radar is not fully reliable
     ret.alphaLongitudinalAvailable = True # bool(ret.flags & FordFlags.CANFD)
-    info(f"| alphaLongAvailable: {ret.alphaLongitudinalAvailable}", True)
-    info(f"| experimental_long: {alpha_long}", True)
-    info(f"| ret.flags & FordFlags.CANFD: {ret.flags & FordFlags.CANFD}", True)
+    # info(f"| alphaLongAvailable: {ret.alphaLongitudinalAvailable}", True)
+    # info(f"| experimental_long: {alpha_long}", True)
+    # info(f"| ret.flags & FordFlags.CANFD: {ret.flags & FordFlags.CANFD}", True)
 
     if alpha_long: # Allow CAN vehicles to use Ford ACC # or not bool(ret.flags & FordFlags.CANFD):
       ret.safetyConfigs[-1].safetyParam |= FordSafetyFlags.LONG_CONTROL.value
@@ -101,7 +101,7 @@ class CarInterface(CarInterfaceBase):
             ret.dashcamOnly = True
 
     # Apply custom parameters from params.json
-    apply_interface_params(ret, "interface")
+    # apply_interface_params(ret, "interface")
 
     # Auto Transmission: 0x732 ECU or Gear_Shift_by_Wire_FD1
     found_ecus = [fw.ecu for fw in car_fw]
@@ -117,11 +117,11 @@ class CarInterface(CarInterfaceBase):
 
     if 0x365 in fingerprint[CAN.main]:  # F150 HEV Cluster_HEV_Data2 signal (869 = 0x365)
       ret.flags |= int(FordFlags.HEV_CLUSTER_DATA)
-      info('HEV_CLUSTER_DATA signal detected (interface.py)', True)
+      # info('HEV_CLUSTER_DATA signal detected (interface.py)', True)
     # Check for HEV battery data signals
     if 0x07A in fingerprint[CAN.main] and 0x24B in fingerprint[CAN.main] and 0x24C in fingerprint[CAN.main]:  # 122, 587, 588
       ret.flags |= int(FordFlags.HEV_BATTERY_DATA)
-      info('HEV_BATTERY_DATA signal detected (interface.py)', True)
+      # info('HEV_BATTERY_DATA signal detected (interface.py)', True)
 
     # LCA can steer down to zero
     ret.minSteerSpeed = 0.

@@ -14,10 +14,10 @@ from opendbc.car.interfaces import CarControllerBase, V_CRUISE_MAX
 from common.params import Params
 from selfdrive.modeld.constants import ModelConstants  # for calculations
 from common.pid import PIDController # PID control of lateral
-from bluepilot.params.bp_params import load_custom_params, update_custom_params  # Import custom param functions
+# from bluepilot.params.bp_params import load_custom_params, update_custom_params  # Import custom param functions
 from opendbc.car.ford.helpers import compute_dm_msg_values
-from bluepilot.logger.bp_logger import debug, info, warning, error, critical
-from opendbc.sunnypilot.car.ford.icbm import IntelligentCruiseButtonManagementInterface
+# from bluepilot.logger.bp_logger import debug, info, warning, error, critical
+# from opendbc.sunnypilot.car.ford.icbm import IntelligentCruiseButtonManagementInterface
 
 
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -81,10 +81,10 @@ def apply_creep_compensation(accel: float, v_ego: float) -> float:
   return float(accel)
 
 
-class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterface):
+class CarController(CarControllerBase): #, IntelligentCruiseButtonManagementInterface):
   def __init__(self, dbc_names, CP, CP_SP):
     CarControllerBase.__init__(self, dbc_names, CP, CP_SP)
-    IntelligentCruiseButtonManagementInterface.__init__(self, CP, CP_SP)
+    # IntelligentCruiseButtonManagementInterface.__init__(self, CP, CP_SP)
 
     self.params = Params()
 
@@ -92,7 +92,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.CAN = fordcan.CanBus(CP)
 
     # Load initial custom parameters from params.json
-    load_custom_params(self, "carcontroller")
+    # load_custom_params(self, "carcontroller")
 
     # Initialize control variables
     self.apply_curvature_last = 0
@@ -207,7 +207,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.curvature_rate = 0  # initialize curvature_rate
 
     # Logging variables
-    debug(f'Car Fingerprint (CarController): {CP.carFingerprint}', True)
+    # debug(f'Car Fingerprint (CarController): {CP.carFingerprint}', True)
 
     # Lane change transition tracking
     self.post_lane_change_timer = 0
@@ -317,7 +317,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     # Trigger the update of the settings params
     # update_settings_params(self)
-    update_custom_params(self, "carcontroller")
+    # update_custom_params(self, "carcontroller")
 
     actuators = CC.actuators
     hud_control = CC.hudControl
@@ -356,10 +356,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       can_sends.append(fordcan.create_button_msg(self.packer, self.CAN.camera, CS.buttons_stock_values, tja_toggle=True))
 
     # Intelligent Cruise Button Management (ICBM)
-    icbm_can_sends, self.last_button_frame = IntelligentCruiseButtonManagementInterface.update(
-      self, CC_SP, CS, self.packer, self.CAN, self.frame, self.last_button_frame
-    )
-    can_sends.extend(icbm_can_sends)
+    # icbm_can_sends, self.last_button_frame = IntelligentCruiseButtonManagementInterface.update(
+    #   self, CC_SP, CS, self.packer, self.CAN, self.frame, self.last_button_frame
+    # )
+    # can_sends.extend(icbm_can_sends)
 
     ### lateral control ###
 

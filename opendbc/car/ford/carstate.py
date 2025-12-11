@@ -6,10 +6,10 @@ from opendbc.car.ford.fordcan import CanBus
 from opendbc.car.ford.values import DBC, CarControllerParams, FordConfig, FordFlags
 from opendbc.car.interfaces import CarStateBase
 from cereal import messaging
-from bluepilot.logger.bp_logger import debug, info, warning, error, critical
+# from bluepilot.logger.bp_logger import debug, info, warning, error, critical
 from opendbc.sunnypilot.car.ford.mads import MadsCarState
 
-# from opendbc.car.ford.fordcanparser import FordCanParser
+from opendbc.car.ford.fordcanparser import FordCanParser
 from opendbc.car.ford.helpers import get_hev_power_flow_text, get_hev_engine_on_reason_text
 
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -43,7 +43,6 @@ class CarState(CarStateBase, MadsCarState):
     self.params.put_bool("FordPrefHevDataAvailable", True if CP.flags & FordFlags.HEV_CLUSTER_DATA else False)
     self.params.put_bool("FordPrefHevBattDataAvailable", True if CP.flags & FordFlags.HEV_BATTERY_DATA else False)
     self.hev_data_available = CP.flags & FordFlags.HEV_CLUSTER_DATA
-
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
@@ -128,7 +127,7 @@ class CarState(CarStateBase, MadsCarState):
       if self.CP.flags & FordFlags.CANFD:
         gear = self.shifter_values.get(cp.vl["Gear_Shift_by_Wire_FD1"]["TrnRng_D_RqGsm"])
       elif self.CP.flags & FordFlags.ALT_STEER_ANGLE:
-           gear = self.shifter_values.get(cp.vl["TransGearData"]["GearLvrPos_D_Actl"])
+          gear = self.shifter_values.get(cp.vl["TransGearData"]["GearLvrPos_D_Actl"])
       else:
         gear = self.shifter_values.get(cp.vl["PowertrainData_10"]["TrnRng_D_Rq"])
 
