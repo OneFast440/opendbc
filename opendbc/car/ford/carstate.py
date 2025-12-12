@@ -3,13 +3,13 @@ from opendbc.car import Bus, create_button_events, structs
 from opendbc.car.common.conversions import Conversions as CV
 from openpilot.common.params import Params
 from opendbc.car.ford.fordcan import CanBus
-from opendbc.car.ford.values import DBC, CarControllerParams, FordConfig, FordFlags
+from opendbc.car.ford.values import DBC, CarControllerParams, FordFlags
 from opendbc.car.interfaces import CarStateBase
 from cereal import messaging
 # from bluepilot.logger.bp_logger import debug, info, warning, error, critical
 from opendbc.sunnypilot.car.ford.mads import MadsCarState
 
-from opendbc.car.ford.fordcanparser import FordCanParser
+# from opendbc.car.ford.fordcanparser import FordCanParser
 from opendbc.car.ford.helpers import get_hev_power_flow_text, get_hev_engine_on_reason_text
 
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -25,7 +25,7 @@ class CarState(CarStateBase, MadsCarState):
     self.params = Params()
     # self.ford_can_parser = FordCanParser(CP)
 
-    self.bluecruise_cluster_present = FordConfig.BLUECRUISE_CLUSTER_PRESENT # Sets the value of whether the car has the blue cruise cluster
+    # self.bluecruise_cluster_present = FordConfig.BLUECRUISE_CLUSTER_PRESENT # Sets the value of whether the car has the blue cruise cluster
     if CP.transmissionType == TransmissionType.automatic:
       if CP.flags & FordFlags.CANFD:
         self.shifter_values = can_define.dv["Gear_Shift_by_Wire_FD1"]["TrnRng_D_RqGsm"]
