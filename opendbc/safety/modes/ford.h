@@ -225,7 +225,7 @@ static bool path_angle_cmd_checks(int desired_path_angle, bool steer_control_ena
     int highest_desired_path_angle = desired_path_angle_last + delta_path_angle_roc;
     int lowest_desired_path_angle = desired_path_angle_last - delta_path_angle_roc;
 
-    violation |= max_limit_check(desired_path_angle, highest_desired_path_angle, lowest_desired_path_angle);
+    violation |= safety_max_limit_check(desired_path_angle, highest_desired_path_angle, lowest_desired_path_angle);
     // print("path_angle_cmd_checks 1: ");
     // print("desired_path_angle: "); puti(desired_path_angle); print(" ");
     // print("desired_path_angle_last: "); puti(desired_path_angle_last); print(" ");
@@ -259,7 +259,7 @@ static bool path_offset_cmd_checks(int desired_path_offset, bool steer_control_e
     int highest_desired_path_offset = desired_path_offset_last + delta_path_offset_roc;
     int lowest_desired_path_offset = desired_path_offset_last - delta_path_offset_roc;
 
-    violation |= max_limit_check(desired_path_offset, highest_desired_path_offset, lowest_desired_path_offset);
+    violation |= safety_max_limit_check(desired_path_offset, highest_desired_path_offset, lowest_desired_path_offset);
     // print("path_offset_cmd_checks 1: ");
     // print("desired_path_offset: "); puti(desired_path_offset); print(" ");
     // print("desired_path_offset_last: "); puti(desired_path_offset_last); print(" ");
@@ -294,7 +294,7 @@ static bool curvature_rate_cmd_checks(int desired_curvature_rate, bool steer_con
     int highest_desired_curvature_rate = desired_curvature_rate_last + desired_curvature_rate_roc;
     int lowest_desired_curvature_rate = desired_curvature_rate_last - desired_curvature_rate_roc;
 
-    violation |= max_limit_check(desired_curvature_rate, highest_desired_curvature_rate, lowest_desired_curvature_rate);
+    violation |= safety_max_limit_check(desired_curvature_rate, highest_desired_curvature_rate, lowest_desired_curvature_rate);
     // print("curvature_rate_cmd_checks 1: ");
     // print("desired_curvature_rate: "); puti(desired_curvature_rate); print(" ");
     // print("desired_curvature_rate_last: "); puti(desired_curvature_rate_last); print(" ");
@@ -344,7 +344,7 @@ static void ford_rx_hook(const CANPacket_t *msg) {
       // Signal: VehYaw_W_Actl
       // TODO: we should use the speed which results in the closest angle measurement to the desired angle
       float ford_yaw_rate = (((msg->data[2] << 8U) | msg->data[3]) * 0.0002) - 6.5;
-      float current_curvature = ford_yaw_rate / MAX(vehicle_speed.values[0] / VEHICLE_SPEED_FACTOR, 0.1);
+      float current_curvature = ford_yaw_rate / SAFETY_MAX(vehicle_speed.values[0] / VEHICLE_SPEED_FACTOR, 0.1);
       // convert current curvature into units on CAN for comparison with desired curvature
       update_sample(&angle_meas, ROUND(current_curvature * FORD_STEERING_LIMITS.angle_deg_to_can));
     }
