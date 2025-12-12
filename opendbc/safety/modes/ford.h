@@ -220,7 +220,7 @@ static bool path_angle_cmd_checks(int desired_path_angle, bool steer_control_ena
   if(steer_control_enabled){
     float speed = ((float)vehicle_speed.min / VEHICLE_SPEED_FACTOR) - 1.;
 
-    int delta_path_angle_roc = (interpolate(limits.angle_rate_up_lookup, speed) * limits.angle_deg_to_can) + 1.;
+    int delta_path_angle_roc = (safety_interpolate(limits.angle_rate_up_lookup, speed) * limits.angle_deg_to_can) + 1.;
 
     int highest_desired_path_angle = desired_path_angle_last + delta_path_angle_roc;
     int lowest_desired_path_angle = desired_path_angle_last - delta_path_angle_roc;
@@ -254,7 +254,7 @@ static bool path_offset_cmd_checks(int desired_path_offset, bool steer_control_e
   if(steer_control_enabled){
     float speed = ((float)vehicle_speed.min / VEHICLE_SPEED_FACTOR) - 1.;
 
-    int delta_path_offset_roc = (interpolate(limits.angle_rate_up_lookup, speed) * limits.angle_deg_to_can) + 1.;
+    int delta_path_offset_roc = (safety_interpolate(limits.angle_rate_up_lookup, speed) * limits.angle_deg_to_can) + 1.;
 
     int highest_desired_path_offset = desired_path_offset_last + delta_path_offset_roc;
     int lowest_desired_path_offset = desired_path_offset_last - delta_path_offset_roc;
@@ -289,7 +289,7 @@ static bool curvature_rate_cmd_checks(int desired_curvature_rate, bool steer_con
   if(steer_control_enabled){
     float speed = ((float)vehicle_speed.min / VEHICLE_SPEED_FACTOR) - 1.;
 
-    int desired_curvature_rate_roc = (interpolate(limits.angle_rate_up_lookup, speed) * limits.angle_deg_to_can) + 1.;
+    int desired_curvature_rate_roc = (safety_interpolate(limits.angle_rate_up_lookup, speed) * limits.angle_deg_to_can) + 1.;
 
     int highest_desired_curvature_rate = desired_curvature_rate_last + desired_curvature_rate_roc;
     int lowest_desired_curvature_rate = desired_curvature_rate_last - desired_curvature_rate_roc;
