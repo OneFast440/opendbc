@@ -170,7 +170,7 @@ class CarController(CarControllerBase): #, IntelligentCruiseButtonManagementInte
     self.LC_PID_GAIN_CAN = 5.0
     self.LC_PID_GAIN_CANFD_SMALL_VEHICLE = 3.0
     self.LC_PID_GAIN_CANFD_LARGE_VEHICLE = 3.0
-    self.LC_PID_GAIN_UI = 0.0 # gain for UI tuning
+    self.LC_PID_GAIN_UI = 3.5 # gain for UI tuning
     self.LC_PID_GAIN = 0.0
     self.LC_PID_k_p = 0.25
     self.LC_PID_k_i = 0.05
@@ -579,7 +579,7 @@ class CarController(CarControllerBase): #, IntelligentCruiseButtonManagementInte
           path_offset = 0
 
         # Use the UI variable for adjustable Gain and set the PID gain to a fixed number, UI variable divided by 100 to make UI variable more closely match the 2.1 logic tuning.
-        path_offset_error = (path_offset * (self.LC_PID_gain_UI/100))
+        path_offset_error = (path_offset * (self.LC_PID_GAIN_UI/100))
 
         # determine speed factor
         LC_PID_speed_factor = interp(CS.out.vEgoRaw, self.LC_PID_speed_bp, self.LC_PID_speed_v)
