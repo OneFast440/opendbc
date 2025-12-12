@@ -6,7 +6,7 @@ from opendbc.car.ford.carcontroller import CarController
 from opendbc.car.ford.carstate import CarState
 from opendbc.car.ford.fordcan import CanBus
 from opendbc.car.ford.radar_interface import RadarInterface
-from opendbc.car.ford.values import CarControllerParams, DBC, Ecu, FordFlags, FordConfig, RADAR, FordSafetyFlags
+from opendbc.car.ford.values import CarControllerParams, DBC, Ecu, FordFlags, RADAR, FordSafetyFlags
 from opendbc.car.interfaces import CarInterfaceBase
 # from bluepilot.params.bp_params import apply_interface_params
 # from bluepilot.logger.bp_logger import debug, info, warning, error, critical
