@@ -17,6 +17,18 @@ from opendbc.car.subaru.values import SubaruFlags
 from opendbc.car.toyota.values import ToyotaSafetyFlags
 from opendbc.sunnypilot.car.hyundai.enable_radar_tracks import enable_radar_tracks as hyundai_enable_radar_tracks
 from opendbc.sunnypilot.car.hyundai.longitudinal.helpers import LongitudinalTuningType
+from opendbc.sunnypilot.car.ford.values_ext import (
+  BLEND_RATIO_RANGE,
+  FordSafetyFlagsSP,
+  HIGH_SPEED_DAMPENING_RANGE,
+  HIGH_SPEED_FACTOR_RANGE,
+  LANE_CHANGE_FACTOR_CURV_RANGE,
+  LANE_CHANGE_FACTOR_RANGE,
+  LANE_POSITIONING_GAIN_RANGE,
+  LOW_SPEED_FACTOR_RANGE,
+  PATH_OFFSET_RANGE,
+  PrimaryLateralControl,
+)
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
 from opendbc.sunnypilot.car.subaru.values_ext import SubaruFlagsSP, SubaruSafetyFlagsSP
 from opendbc.sunnypilot.car.tesla.values import MadsScreenButtonType, TeslaFlagsSP, TeslaSafetyFlagsSP
@@ -90,6 +102,7 @@ def setup_interfaces(CI, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
   _initialize_radar_tracks(CP, CP_SP, can_recv, can_send)
   _initialize_stop_and_go(CP, CP_SP, params_dict)
   _initialize_toyota(CP, CP_SP, params_dict)
+  _initialize_ford(CP, CP_SP, params_dict)
 
 
 def _initialize_custom_longitudinal_tuning(CI, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
@@ -151,6 +164,73 @@ def _initialize_stop_and_go(CP: structs.CarParams, CP_SP: structs.CarParamsSP, p
       CP_SP.flags |= SubaruFlagsSP.STOP_AND_GO_MANUAL_PARKING_BRAKE.value
     if stop_and_go or stop_and_go_manual_parking_brake:
       CP_SP.safetyParam |= SubaruSafetyFlagsSP.STOP_AND_GO
+
+
+def _clamp_tuning(raw, spec: tuple[float, float, float]) -> float:
+  default, lo, hi = spec
+  try:
+    value = float(raw)
+  except (TypeError, ValueError):
+    return default
+  if value == 0.0:
+    return default
+  return float(np.clip(value, lo, hi))
+
+
+def _bool_param(params_dict: dict[str, str], key: str, default: bool = False) -> bool:
+  raw = params_dict.get(key)
+  if raw is None or raw == "":
+    return default
+  try:
+    return int(raw) == 1
+  except (TypeError, ValueError):
+    return default
+
+
+def _initialize_ford(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_dict: dict[str, str]) -> None:
+  """Ford lateral, longitudinal and cluster settings (BluePilot).
+
+  Read once here rather than live in the car controller: the panda's lateral mode and
+  longitudinal allowlist come from the same read, and a live flip against stale firmware would
+  have openpilot fighting the panda. Changing any of these needs an onroad cycle.
+  """
+  if CP.brand != 'ford':
+    return
+
+  try:
+    mode = PrimaryLateralControl(int(params_dict.get("FordPrefLateralControl", 0) or 0))
+  except ValueError:
+    mode = PrimaryLateralControl.stock
+
+  lateral = CP_SP.fordLateralTuning
+  lateral.primaryControl = int(mode)
+  # bits 0-1 of the SP safety param; the panda falls back to stock on anything it does not know
+  CP_SP.safetyParam |= int(mode) & FordSafetyFlagsSP.LATERAL_MODE_MASK
+
+  if mode == PrimaryLateralControl.angle:
+    lateral.lowSpeedFactor = _clamp_tuning(params_dict.get("FordLowSpeedFactor_ang"), LOW_SPEED_FACTOR_RANGE)
+    lateral.highSpeedFactor = _clamp_tuning(params_dict.get("FordHighSpeedFactor_ang"), HIGH_SPEED_FACTOR_RANGE)
+    lateral.highSpeedDampening = _clamp_tuning(params_dict.get("FordHighSpeedDampening_ang"), HIGH_SPEED_DAMPENING_RANGE)
+    lateral.laneChangeFactor = _clamp_tuning(params_dict.get("FordLaneChangeFactor_ang"), LANE_CHANGE_FACTOR_RANGE)
+  elif mode == PrimaryLateralControl.curvature:
+    lateral.humanTurnDetection = _bool_param(params_dict, "FordHumanTurnDetection_curv", True)
+    lateral.laneChangeFactorCurv = _clamp_tuning(params_dict.get("FordLaneChangeFactor_curv"), LANE_CHANGE_FACTOR_CURV_RANGE)
+    lateral.blendRatioLow = _clamp_tuning(params_dict.get("FordBlendRatioLow_curv"), BLEND_RATIO_RANGE)
+    lateral.blendRatioHigh = _clamp_tuning(params_dict.get("FordBlendRatioHigh_curv"), BLEND_RATIO_RANGE)
+    lateral.lanePositioning = _bool_param(params_dict, "FordLanePositioning_curv")
+    lateral.laneFullMode = _bool_param(params_dict, "FordLaneFullMode_curv")
+    # zero is a legitimate path offset, so it is clamped rather than defaulted
+    lateral.pathOffset = float(np.clip(float(params_dict.get("FordPathOffset_curv") or 0.0),
+                                       PATH_OFFSET_RANGE[1], PATH_OFFSET_RANGE[2]))
+    lateral.customProfile = int(params_dict.get("FordCustomProfile_curv", 0) or 0)
+    lateral.lanePositioningGain = _clamp_tuning(params_dict.get("FordLanePositioningGain_curv"),
+                                                LANE_POSITIONING_GAIN_RANGE)
+
+  CP_SP.fordLongitudinalTuning.followControl = _bool_param(params_dict, "FordFollowControl", True)
+  CP_SP.fordLongitudinalTuning.downhillCompensation = _bool_param(params_dict, "FordDownhillCompensation", True)
+
+  CP_SP.fordHud.handsFreeClusterMsg = _bool_param(params_dict, "FordHandsFreeClusterMsg")
+  CP_SP.fordHud.driverMonitorCanMsg = _bool_param(params_dict, "FordDriverMonitorCanMsg")
 
 
 def _initialize_toyota(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_dict: dict[str, str]) -> None:

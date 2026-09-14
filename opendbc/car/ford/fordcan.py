@@ -44,7 +44,7 @@ def create_lka_msg(packer, CAN: CanBus):
 
 
 def create_lat_ctl_msg(packer, CAN: CanBus, lat_active: bool, path_offset: float, path_angle: float, curvature: float,
-                       curvature_rate: float):
+                       curvature_rate: float, ramp_type: int = 0, precision_type: int = 1):
   """
   Creates a CAN message for the Ford TJA/LCA Command.
 
@@ -71,9 +71,9 @@ def create_lat_ctl_msg(packer, CAN: CanBus, lat_active: bool, path_offset: float
     "HandsOffCnfm_B_Rq": 0,                     # Unknown: 0=Inactive, 1=Active [0|1]
     "LatCtl_D_Rq": 1 if lat_active else 0,      # Mode: 0=None, 1=ContinuousPathFollowing, 2=InterventionLeft,
                                                 #       3=InterventionRight, 4-7=NotUsed [0|7]
-    "LatCtlRampType_D_Rq": 0,                   # Ramp speed: 0=Slow, 1=Medium, 2=Fast, 3=Immediate [0|3]
+    "LatCtlRampType_D_Rq": ramp_type,           # Ramp speed: 0=Slow, 1=Medium, 2=Fast, 3=Immediate [0|3]
                                                 #             Makes no difference with curvature control
-    "LatCtlPrecision_D_Rq": 1,                  # Precision: 0=Comfortable, 1=Precise, 2/3=NotUsed [0|3]
+    "LatCtlPrecision_D_Rq": precision_type,     # Precision: 0=Comfortable, 1=Precise, 2/3=NotUsed [0|3]
                                                 #            The stock system always uses comfortable
     "LatCtlPathOffst_L_Actl": path_offset,      # Path offset [-5.12|5.11] meter
     "LatCtlPath_An_Actl": path_angle,           # Path angle [-0.5|0.5235] radians
@@ -84,7 +84,7 @@ def create_lat_ctl_msg(packer, CAN: CanBus, lat_active: bool, path_offset: float
 
 
 def create_lat_ctl2_msg(packer, CAN: CanBus, mode: int, path_offset: float, path_angle: float, curvature: float,
-                        curvature_rate: float, counter: int):
+                        curvature_rate: float, counter: int, ramp_type: int = 0, precision_type: int = 1):
   """
   Create a CAN message for the new Ford Lane Centering command.
 
@@ -97,8 +97,8 @@ def create_lat_ctl2_msg(packer, CAN: CanBus, mode: int, path_offset: float, path
   values = {
     "LatCtl_D2_Rq": mode,                       # Mode: 0=None, 1=PathFollowingLimitedMode, 2=PathFollowingExtendedMode,
                                                 #       3=SafeRampOut, 4-7=NotUsed [0|7]
-    "LatCtlRampType_D_Rq": 0,                   # 0=Slow, 1=Medium, 2=Fast, 3=Immediate [0|3]
-    "LatCtlPrecision_D_Rq": 1,                  # 0=Comfortable, 1=Precise, 2/3=NotUsed [0|3]
+    "LatCtlRampType_D_Rq": ramp_type,           # 0=Slow, 1=Medium, 2=Fast, 3=Immediate [0|3]
+    "LatCtlPrecision_D_Rq": precision_type,     # 0=Comfortable, 1=Precise, 2/3=NotUsed [0|3]
     "LatCtlPathOffst_L_Actl": path_offset,      # [-5.12|5.11] meter
     "LatCtlPath_An_Actl": path_angle,           # [-0.5|0.5235] radians
     "LatCtlCurv_No_Actl": curvature,            # [-0.02|0.02094] 1/meter
@@ -115,7 +115,8 @@ def create_lat_ctl2_msg(packer, CAN: CanBus, mode: int, path_offset: float, path
   return packer.make_can_msg("LateralMotionControl2", CAN.main, values)
 
 
-def create_acc_msg(packer, CAN: CanBus, long_active: bool, gas: float, accel: float, stopping: bool, brake_request, v_ego_kph: float):
+def create_acc_msg(packer, CAN: CanBus, long_active: bool, gas: float, accel: float, stopping: bool, brake_request,
+                   v_ego_kph: float, precharge_request=None, accel_pred: float = -5.0):
   """
   Creates a CAN message for the Ford ACC Command.
 
@@ -130,17 +131,101 @@ def create_acc_msg(packer, CAN: CanBus, long_active: bool, gas: float, accel: fl
     "AccPrpl_A_Rq": gas,                              # Acceleration request: [-5|5.23] m/s^2
     # No observed acceleration seen from this signal alone. During stock system operation, it appears to
     # be the raw acceleration request (AccPrpl_A_Rq when positive, AccBrkTot_A_Rq when negative)
-    "AccPrpl_A_Pred": -5.0,                           # Acceleration request: [-5|5.23] m/s^2
+    "AccPrpl_A_Pred": accel_pred,                     # Acceleration request: [-5|5.23] m/s^2
     "AccResumEnbl_B_Rq": 1 if long_active else 0,
     # No observed acceleration seen from this signal alone
     "AccVeh_V_Trg": v_ego_kph,                        # Target speed: [0|255] km/h
     # TODO: we may be able to improve braking response by utilizing pre-charging better
     # When setting these two bits without AccBrkTot_A_Rq, an initial jerk is observed and car may be able to brake temporarily with AccPrpl_A_Rq
-    "AccBrkPrchg_B_Rq": 1 if brake_request else 0,            # Pre-charge brake request: 0=No, 1=Yes
+    # pre-charge normally tracks the brake request; sunnypilot's follow control gives it its own
+    # hysteresis so the brakes pre-charge slightly before they bite
+    "AccBrkPrchg_B_Rq": 1 if (brake_request if precharge_request is None else precharge_request) else 0,
     "AccBrkDecel_B_Rq": 1 if brake_request else 0,            # Deceleration request: 0=Inactive, 1=Active
     "AccStopStat_B_Rq": 1 if stopping else 0,
   }
   return packer.make_can_msg("ACCDATA", CAN.main, values)
+
+
+# Signals these messages carry that openpilot does not set, forwarded unmodified so stock
+# functionality survives. Hoisted out of the builders below so opendbc/sunnypilot's variants can
+# reuse them rather than keeping a copy that drifts.
+ACC_UI_PASSTHROUGH = (
+  "HaDsply_No_Cs",
+  "HaDsply_No_Cnt",
+  "AccStopStat_D_Dsply",       # ACC stopped status message
+  "AccTrgDist2_D_Dsply",       # ACC target distance
+  "AccStopRes_B_Dsply",
+  "TjaWarn_D_Rq",              # TJA warning
+  "TjaMsgTxt_D_Dsply",         # TJA text
+  "IaccLamp_D_Rq",             # iACC status icon
+  "AccMsgTxt_D2_Rq",           # ACC text
+  "FcwDeny_B_Dsply",           # FCW disabled
+  "FcwMemStat_B_Actl",         # FCW enabled setting
+  "AccTGap_B_Dsply",           # ACC time gap display setting
+  "CadsAlignIncplt_B_Actl",
+  "AccFllwMde_B_Dsply",        # ACC follow mode display setting
+  "CadsRadrBlck_B_Actl",
+  "CmbbPostEvnt_B_Dsply",      # AEB event status
+  "AccStopMde_B_Dsply",        # ACC stop mode display setting
+  "FcwMemSens_D_Actl",         # FCW sensitivity setting
+  "FcwMsgTxt_D_Rq",            # FCW text
+  "AccWarn_D_Dsply",           # ACC warning
+  "FcwVisblWarn_B_Rq",         # FCW visible alert
+  "FcwAudioWarn_B_Rq",         # FCW audio alert
+  "AccTGap_D_Dsply",           # ACC time gap
+  "AccMemEnbl_B_RqDrv",        # ACC adaptive/normal setting
+  "FdaMem_B_Stat",             # FDA enabled setting
+)
+
+LKAS_UI_PASSTHROUGH = (
+  "FeatConfigIpmaActl",
+  "FeatNoIpmaActl",
+  "PersIndexIpma_D_Actl",
+  "AhbcRampingV_D_Rq",     # AHB ramping
+  "LaDenyStats_B_Dsply",   # LKAS error
+  "CamraDefog_B_Req",      # Windshield heater?
+  "CamraStats_D_Dsply",    # Camera status
+  "DasAlrtLvl_D_Dsply",    # DAS alert level
+  "DasStats_D_Dsply",      # DAS status
+  "DasWarn_D_Dsply",       # DAS warning
+  "AhbHiBeam_D_Rq",        # AHB status
+  "Passthru_63",
+  "Passthru_48",
+)
+
+BUTTON_PASSTHROUGH = (
+  "HeadLghtHiFlash_D_Stat",  # SCCM Passthrough the remaining buttons
+  "TurnLghtSwtch_D_Stat",    # SCCM Turn signal switch
+  "WiprFront_D_Stat",
+  "LghtAmb_D_Sns",
+  "AccButtnGapDecPress",
+  "AccButtnGapIncPress",
+  "AslButtnOnOffCnclPress",
+  "AslButtnOnOffPress",
+  "LaSwtchPos_D_Stat",
+  "CcAslButtnCnclResPress",
+  "CcAslButtnDeny_B_Actl",
+  "CcAslButtnIndxDecPress",
+  "CcAslButtnIndxIncPress",
+  "CcAslButtnOffCnclPress",
+  "CcAslButtnOnOffCncl",
+  "CcAslButtnOnPress",
+  "CcAslButtnResDecPress",
+  "CcAslButtnResIncPress",
+  "CcAslButtnSetDecPress",
+  "CcAslButtnSetIncPress",
+  "CcAslButtnSetPress",
+  "CcButtnOffPress",
+  "CcButtnOnOffCnclPress",
+  "CcButtnOnOffPress",
+  "CcButtnOnPress",
+  "HeadLghtHiFlash_D_Actl",
+  "HeadLghtHiOn_B_StatAhb",
+  "AhbStat_B_Dsply",
+  "AccButtnGapTogglePress",
+  "WiprFrontSwtch_D_Stat",
+  "HeadLghtHiCtrl_D_RqAhb",
+)
 
 
 def create_acc_ui_msg(packer, CAN: CanBus, CP, main_on: bool, enabled: bool, fcw_alert: bool, standstill: bool,
@@ -172,33 +257,7 @@ def create_acc_ui_msg(packer, CAN: CanBus, CP, main_on: bool, enabled: bool, fcw
   else:
     status = 0    # Off
 
-  values = {s: stock_values[s] for s in [
-    "HaDsply_No_Cs",
-    "HaDsply_No_Cnt",
-    "AccStopStat_D_Dsply",       # ACC stopped status message
-    "AccTrgDist2_D_Dsply",       # ACC target distance
-    "AccStopRes_B_Dsply",
-    "TjaWarn_D_Rq",              # TJA warning
-    "TjaMsgTxt_D_Dsply",         # TJA text
-    "IaccLamp_D_Rq",             # iACC status icon
-    "AccMsgTxt_D2_Rq",           # ACC text
-    "FcwDeny_B_Dsply",           # FCW disabled
-    "FcwMemStat_B_Actl",         # FCW enabled setting
-    "AccTGap_B_Dsply",           # ACC time gap display setting
-    "CadsAlignIncplt_B_Actl",
-    "AccFllwMde_B_Dsply",        # ACC follow mode display setting
-    "CadsRadrBlck_B_Actl",
-    "CmbbPostEvnt_B_Dsply",      # AEB event status
-    "AccStopMde_B_Dsply",        # ACC stop mode display setting
-    "FcwMemSens_D_Actl",         # FCW sensitivity setting
-    "FcwMsgTxt_D_Rq",            # FCW text
-    "AccWarn_D_Dsply",           # ACC warning
-    "FcwVisblWarn_B_Rq",         # FCW visible alert
-    "FcwAudioWarn_B_Rq",         # FCW audio alert
-    "AccTGap_D_Dsply",           # ACC time gap
-    "AccMemEnbl_B_RqDrv",        # ACC adaptive/normal setting
-    "FdaMem_B_Stat",             # FDA enabled setting
-  ]}
+  values = {s: stock_values[s] for s in ACC_UI_PASSTHROUGH}
 
   values.update({
     "Tja_D_Stat": status,        # TJA status
@@ -266,21 +325,7 @@ def create_lkas_ui_msg(packer, CAN: CanBus, main_on: bool, enabled: bool, steer_
 
   hands_on_wheel_dsply = 1 if steer_alert else 0
 
-  values = {s: stock_values[s] for s in [
-    "FeatConfigIpmaActl",
-    "FeatNoIpmaActl",
-    "PersIndexIpma_D_Actl",
-    "AhbcRampingV_D_Rq",     # AHB ramping
-    "LaDenyStats_B_Dsply",   # LKAS error
-    "CamraDefog_B_Req",      # Windshield heater?
-    "CamraStats_D_Dsply",    # Camera status
-    "DasAlrtLvl_D_Dsply",    # DAS alert level
-    "DasStats_D_Dsply",      # DAS status
-    "DasWarn_D_Dsply",       # DAS warning
-    "AhbHiBeam_D_Rq",        # AHB status
-    "Passthru_63",
-    "Passthru_48",
-  ]}
+  values = {s: stock_values[s] for s in LKAS_UI_PASSTHROUGH}
 
   values.update({
     "LaActvStats_D_Dsply": lines,                 # LKAS status (lines) [0|31]
@@ -289,7 +334,8 @@ def create_lkas_ui_msg(packer, CAN: CanBus, main_on: bool, enabled: bool, steer_
   return packer.make_can_msg("IPMA_Data", CAN.main, values)
 
 
-def create_button_msg(packer, bus: int, stock_values: dict, cancel=False, resume=False, tja_toggle=False):
+def create_button_msg(packer, bus: int, stock_values: dict, cancel=False, resume=False, tja_toggle=False,
+                      icbm_button: str | None = None):
   """
   Creates a CAN message for the Ford SCCM buttons/switches.
 
@@ -298,43 +344,17 @@ def create_button_msg(packer, bus: int, stock_values: dict, cancel=False, resume
   Frequency is 10Hz.
   """
 
-  values = {s: stock_values[s] for s in [
-    "HeadLghtHiFlash_D_Stat",  # SCCM Passthrough the remaining buttons
-    "TurnLghtSwtch_D_Stat",    # SCCM Turn signal switch
-    "WiprFront_D_Stat",
-    "LghtAmb_D_Sns",
-    "AccButtnGapDecPress",
-    "AccButtnGapIncPress",
-    "AslButtnOnOffCnclPress",
-    "AslButtnOnOffPress",
-    "LaSwtchPos_D_Stat",
-    "CcAslButtnCnclResPress",
-    "CcAslButtnDeny_B_Actl",
-    "CcAslButtnIndxDecPress",
-    "CcAslButtnIndxIncPress",
-    "CcAslButtnOffCnclPress",
-    "CcAslButtnOnOffCncl",
-    "CcAslButtnOnPress",
-    "CcAslButtnResDecPress",
-    "CcAslButtnResIncPress",
-    "CcAslButtnSetDecPress",
-    "CcAslButtnSetIncPress",
-    "CcAslButtnSetPress",
-    "CcButtnOffPress",
-    "CcButtnOnOffCnclPress",
-    "CcButtnOnOffPress",
-    "CcButtnOnPress",
-    "HeadLghtHiFlash_D_Actl",
-    "HeadLghtHiOn_B_StatAhb",
-    "AhbStat_B_Dsply",
-    "AccButtnGapTogglePress",
-    "WiprFrontSwtch_D_Stat",
-    "HeadLghtHiCtrl_D_RqAhb",
-  ]}
+  values = {s: stock_values[s] for s in BUTTON_PASSTHROUGH}
 
   values.update({
     "CcAslButtnCnclPress": 1 if cancel else 0,      # CC cancel button
     "CcAsllButtnResPress": 1 if resume else 0,      # CC resume button
     "TjaButtnOnOffPress": 1 if tja_toggle else 0,   # LCA/TJA toggle button
   })
+
+  # Intelligent Cruise Button Management: press a set/increase or set/decrease button so
+  # openpilot can move the stock cruise setpoint
+  if icbm_button is not None:
+    values[icbm_button] = 1
+
   return packer.make_can_msg("Steering_Data_FD1", bus, values)

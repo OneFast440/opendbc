@@ -64,6 +64,36 @@ class CarParamsSP:
   enableGasInterceptor: bool = auto_field()
 
   neuralNetworkLateralControl: 'CarParamsSP.NeuralNetworkLateralControl' = field(default_factory=lambda: CarParamsSP.NeuralNetworkLateralControl())
+  fordLateralTuning: 'CarParamsSP.FordLateralTuning' = field(default_factory=lambda: CarParamsSP.FordLateralTuning())
+  fordLongitudinalTuning: 'CarParamsSP.FordLongitudinalTuning' = field(default_factory=lambda: CarParamsSP.FordLongitudinalTuning())
+  fordHud: 'CarParamsSP.FordHud' = field(default_factory=lambda: CarParamsSP.FordHud())
+
+  @auto_dataclass
+  class FordLateralTuning:
+    primaryControl: int = auto_field()
+    lowSpeedFactor: float = auto_field()
+    highSpeedFactor: float = auto_field()
+    highSpeedDampening: float = auto_field()
+    laneChangeFactor: float = auto_field()
+    humanTurnDetection: bool = auto_field()
+    laneChangeFactorCurv: float = auto_field()
+    blendRatioLow: float = auto_field()
+    blendRatioHigh: float = auto_field()
+    lanePositioning: bool = auto_field()
+    pathOffset: float = auto_field()
+    laneFullMode: bool = auto_field()
+    customProfile: int = auto_field()
+    lanePositioningGain: float = auto_field()
+
+  @auto_dataclass
+  class FordLongitudinalTuning:
+    followControl: bool = auto_field()
+    downhillCompensation: bool = auto_field()
+
+  @auto_dataclass
+  class FordHud:
+    handsFreeClusterMsg: bool = auto_field()
+    driverMonitorCanMsg: bool = auto_field()
 
   @auto_dataclass
   class NeuralNetworkLateralControl:
@@ -144,6 +174,20 @@ class CarControlSP:
   leadOne: 'LeadData' = field(default_factory=lambda: LeadData())
   leadTwo: 'LeadData' = field(default_factory=lambda: LeadData())
   intelligentCruiseButtonManagement: 'IntelligentCruiseButtonManagement' = field(default_factory=lambda: IntelligentCruiseButtonManagement())
+  fordLateral: 'CarControlSP.FordLateral' = field(default_factory=lambda: CarControlSP.FordLateral())
+
+  @auto_dataclass
+  class FordLateral:
+    modelCurvatures: list[float] = auto_field()
+    lateralDelay: float = auto_field()
+    laneChangeState: int = auto_field()
+    laneChangeDirection: int = auto_field()
+    modelPositionY: list[float] = auto_field()
+    laneLineLeftY: float = auto_field()
+    laneLineRightY: float = auto_field()
+    laneLineLeftProb: float = auto_field()
+    laneLineRightProb: float = auto_field()
+    alertType: str = auto_field()
 
   @auto_dataclass
   class Param:

@@ -8,6 +8,7 @@ from opendbc.car.ford.fordcan import CanBus
 from opendbc.car.ford.radar_interface import RadarInterface
 from opendbc.car.ford.values import CarControllerParams, DBC, Ecu, FordFlags, RADAR, FordSafetyFlags
 from opendbc.car.interfaces import CarInterfaceBase
+from opendbc.sunnypilot.car.ford.interfaces_ext import apply_ford_params, apply_ford_params_sp
 
 TransmissionType = structs.CarParams.TransmissionType
 
@@ -97,4 +98,11 @@ class CarInterface(CarInterfaceBase):
 
     ret.autoResumeSng = ret.minEnableSpeed == -1.
     ret.centerToFront = ret.wheelbase * 0.44
+    return ret
+
+  @staticmethod
+  def _get_params_sp(stock_cp: structs.CarParams, ret: structs.CarParamsSP, candidate, fingerprint,
+                     car_fw, alpha_long: bool, is_release_sp: bool, docs: bool) -> structs.CarParamsSP:
+    apply_ford_params(stock_cp, alpha_long)
+    apply_ford_params_sp(ret)
     return ret
