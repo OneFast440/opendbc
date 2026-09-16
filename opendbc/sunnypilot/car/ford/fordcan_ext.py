@@ -6,10 +6,14 @@ See the LICENSE.md file in the root directory for more details.
 """
 from opendbc.car.ford import fordcan
 from opendbc.car.ford.fordcan import CanBus
+from opendbc.sunnypilot.car.ford.values_ext import CURVATURE_MAX
 
 # shadow_curvature wire scale, 1/m per LSB. int16 -> +-0.0327 1/m, comfortably past the +-0.02
 # DBC curvature range plus the deviation band.
 SHADOW_CURVATURE_SCALE = 1e-6
+# ford.h checks the shadow against Ford's own curvature signal range, so the wire value saturates
+# there rather than running past it. See the note in create_lka_msg.
+SHADOW_CURVATURE_MAX_RAW = int(round(CURVATURE_MAX / SHADOW_CURVATURE_SCALE))
 
 
 def create_lka_msg(packer, CAN: CanBus, angle_mode_engaged: bool = False, shadow_curvature: float = 0.0):
@@ -46,8 +50,18 @@ def create_lka_msg(packer, CAN: CanBus, angle_mode_engaged: bool = False, shadow
   addr, dat, bus = packer.make_can_msg("Lane_Assist_Data1", CAN.main, {})
   dat = bytearray(dat)
 
+  # Saturate at Ford's curvature signal range instead of sending the true value. ford.h runs the
+  # shadow through safety_max_limit_check against that range, but the range is a property of the
+  # c2 signal, which angle mode does not use as the actuator: c1 does, under its own range and
+  # rate limit. The model legitimately asks for more curvature than 0.02 1/m in a tight low-speed
+  # corner -- a 90 degree turn at 3 m/s is about 0.03 -- and so does the measured curvature the
+  # shadow tracks while the driver is steering. Sending the unsaturated value there made the panda
+  # reject every LateralMotionControl frame for the length of the corner, which drops lateral
+  # control exactly when the driver is working hardest. Saturating keeps the corroboration honest
+  # up to the limit and leaves the deviation band (which only applies above 10 m/s, where neither
+  # value gets near the limit) doing the real work.
   raw = int(round(shadow_curvature / SHADOW_CURVATURE_SCALE))
-  raw = max(-32768, min(32767, raw)) & 0xFFFF
+  raw = max(-SHADOW_CURVATURE_MAX_RAW, min(SHADOW_CURVATURE_MAX_RAW, raw)) & 0xFFFF
 
   dat[4] |= 1 if angle_mode_engaged else 0
   dat[5] = (raw >> 8) & 0xFF

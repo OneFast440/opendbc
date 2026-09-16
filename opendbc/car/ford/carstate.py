@@ -129,5 +129,13 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
   def get_can_parsers(CP, CP_SP):
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).main),
-      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).camera),
+      # sunnypilot: IPMA_Data's rate is declared rather than learned. Every other message here is
+      # registered lazily with no frequency, so CANParser infers one from the first few frames it
+      # happens to see. IPMA_Data is the stock LKAS cluster status at 1Hz (CarControllerParams.
+      # LKAS_UI_STEP), and a startup burst makes the parser infer something like 12Hz, which sets
+      # a timeout under a second. From then on the message is stale for the last fraction of every
+      # 1Hz gap, canValid drops, and selfdrived raises canError -- an IMMEDIATE_DISABLE, once a
+      # second, for the rest of the drive, over a passthrough UI message. Observed on a 2024 F-150:
+      # a measured 0.85s timeout against a camera sending a metronomic 1.00Hz.
+      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [("IPMA_Data", 1)], CanBus(CP).camera),
     }
