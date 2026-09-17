@@ -121,7 +121,7 @@ _DBC_SAT_FRACTION = 0.90          # fraction of the DBC limit that counts as sat
 # exactly the curvatures where the PSCM attenuates. Requested-vs-delivered asks the question that
 # matters anyway -- how much of what the planner wanted did the truck actually do -- and it counts
 # the clip's own throttling, which the saturation handling should respond to for the same reason.
-_SAT_OBS_LAG_S = 0.20             # actuator lag the comparison aligns to
+_SAT_OBS_LAG_S = 0.031            # s, measured actuator lag the comparison aligns to
 _SAT_OBS_MIN_KAPPA = 0.004        # 1/m -- inside a 250 m radius; below this the ratio is noise
 _SAT_OBS_MIN_SPEED = 5.0          # m/s -- yaw rate over speed is not meaningful below this
 _SAT_OBS_TAU_S = 0.50             # low-pass on the delivery ratio
@@ -138,7 +138,13 @@ _SAT_OBS_MAX_HOLD_S = 10.0        # hard release; longer than any real corner, s
 _SAT_OBS_REFRACTORY_S = 1.0       # after a hard release, before it may arm again
 _SAT_OBS_RATIO_NEUTRAL = 1.0      # what the filter holds while gated, i.e. "delivering fine"
 _SAT_OBS_RATIO_MAX = 2.0          # clamp, so one bad frame cannot drag the filter far
-_SAT_OBS_LAG_FRAMES = max(1, round(_SAT_OBS_LAG_S / _STEER_DT))
+# The lag is finer than the 50 ms lateral tick, so the aligned request is interpolated between
+# the two bracketing frames rather than rounded to one of them. Rounding 31 ms to a whole frame
+# would mean comparing against a command either 0 ms or 50 ms old, and at 20 Hz on a curve entry
+# that difference is most of the ratio.
+_SAT_OBS_LAG_IDX = int(_SAT_OBS_LAG_S // _STEER_DT)               # whole frames back
+_SAT_OBS_LAG_W = (_SAT_OBS_LAG_S / _STEER_DT) - _SAT_OBS_LAG_IDX  # weight on the older frame
+_SAT_OBS_HIST_LEN = _SAT_OBS_LAG_IDX + 2
 
 # Soft rate-of-change limit on path_angle, per lateral call (20 Hz). Deliberately slightly
 # tighter than the panda mirror in safety/modes/ford.h so openpilot never provokes a block.
@@ -220,7 +226,7 @@ class LateralAngleExt:
     # Delivered-vs-commanded saturation observer. Default off: this is live steering code and the
     # thresholds below are road-validated on one truck, not derived from the firmware.
     self.sat_observer_enabled = bool(tuning.satObserver)
-    self.kappa_req_history: deque[float] = deque(maxlen=_SAT_OBS_LAG_FRAMES + 1)
+    self.kappa_req_history: deque[float] = deque(maxlen=_SAT_OBS_HIST_LEN)
     self.kappa_req_last = 0.0
     self.delivery_ratio = _SAT_OBS_RATIO_NEUTRAL
     self.pscm_attenuating = False
@@ -263,7 +269,9 @@ class LateralAngleExt:
 
     # Delay-aligned: what the car is doing now against what was asked for one actuator lag ago.
     # This is the difference between measuring attenuation and measuring ordinary entry lag.
-    kappa_then = self.kappa_req_history[0]
+    newer = self.kappa_req_history[-1 - _SAT_OBS_LAG_IDX]
+    older = self.kappa_req_history[-2 - _SAT_OBS_LAG_IDX]
+    kappa_then = newer * (1.0 - _SAT_OBS_LAG_W) + older * _SAT_OBS_LAG_W
     kappa_now = get_current_curvature(CS)
     alpha = _STEER_DT / (_SAT_OBS_TAU_S + _STEER_DT)
     if abs(kappa_then) >= _SAT_OBS_MIN_KAPPA and kappa_then * kappa_now > 0.0:

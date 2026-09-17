@@ -12,7 +12,10 @@ from opendbc.car.ford.values import CAR
 from opendbc.sunnypilot.car.ford.lateral_angle_ext import (
   _SAT_OBS_ENTER,
   _SAT_OBS_EXIT,
-  _SAT_OBS_LAG_FRAMES,
+  _SAT_OBS_HIST_LEN,
+  _SAT_OBS_LAG_IDX,
+  _SAT_OBS_LAG_S,
+  _SAT_OBS_LAG_W,
   _SAT_OBS_MAX_HOLD_S,
   _SAT_OBS_MIN_KAPPA,
   _SAT_OBS_MIN_SPEED,
@@ -80,13 +83,17 @@ class TestSaturationObserver(unittest.TestCase):
     self.assertFalse(ctrl.pscm_attenuating)
 
   def test_does_not_fire_before_the_debounce(self):
-    ctrl = drive(angle_ctrl(), _SAT_OBS_LAG_FRAMES + 2, KAPPA, 0.0)
+    ctrl = drive(angle_ctrl(), _SAT_OBS_HIST_LEN + 2, KAPPA, 0.0)
     self.assertFalse(ctrl.pscm_attenuating)
 
   def test_curve_entry_alone_does_not_trip_it(self):
-    """The exact failure mode of the old proxy: request ramping up, car lagging behind it."""
+    """The exact failure mode of the old proxy: request ramping up, car lagging well behind it.
+
+    The lag here is 4 frames, far longer than the 31 ms alignment, so the ratio really is low
+    throughout. What keeps the flag down is the rising gate, not the alignment.
+    """
     ctrl = angle_ctrl()
-    history = [0.0] * _SAT_OBS_LAG_FRAMES
+    history = [0.0] * 4
     requested = 0.0
     for _ in range(80):                 # 4 s of continuous entry
       requested = min(KAPPA, requested + 0.0002)
@@ -97,6 +104,24 @@ class TestSaturationObserver(unittest.TestCase):
       ctrl.update(cc, cc_sp, make_cs(v_ego=V, yaw_rate=yaw_for(delivered)),
                   make_actuators(curvature=requested))
       self.assertFalse(ctrl.pscm_attenuating, "entry lag was read as attenuation")
+
+  def test_lag_alignment_is_sub_frame(self):
+    """31 ms is finer than the 50 ms tick, so the aligned request is interpolated, not rounded."""
+    self.assertEqual(_SAT_OBS_LAG_IDX, 0)
+    self.assertAlmostEqual(_SAT_OBS_LAG_W, _SAT_OBS_LAG_S / _STEER_DT, places=9)
+    self.assertAlmostEqual((_SAT_OBS_LAG_IDX + _SAT_OBS_LAG_W) * _STEER_DT, _SAT_OBS_LAG_S, places=9)
+    self.assertGreaterEqual(_SAT_OBS_HIST_LEN, _SAT_OBS_LAG_IDX + 2)
+
+  def test_alignment_uses_both_bracketing_frames(self):
+    """A one-frame step in the request must show up weighted, not all-or-nothing."""
+    ctrl = angle_ctrl()
+    drive(ctrl, 10, KAPPA, KAPPA)          # settle with the request flat
+    drive(ctrl, 1, KAPPA * 2, KAPPA)       # one frame at double the request
+    newer, older = ctrl.kappa_req_history[-1], ctrl.kappa_req_history[-2]
+    self.assertNotAlmostEqual(newer, older)
+    blended = newer * (1.0 - _SAT_OBS_LAG_W) + older * _SAT_OBS_LAG_W
+    self.assertLess(blended, max(newer, older))
+    self.assertGreater(blended, min(newer, older))
 
   def test_disabled_observer_never_flags(self):
     ctrl = drive(angle_ctrl(sat_observer=False), ARM_FRAMES, KAPPA, 0.0)

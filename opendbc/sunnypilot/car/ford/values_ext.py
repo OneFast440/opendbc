@@ -109,13 +109,23 @@ BP_ANGLE_LIMITS = AngleSteeringLimits(CURVATURE_MAX, _BP_ANGLE_RATE_UP, _BP_ANGL
 
 # *** PSCM firmware ground truth ***
 #
-# Read out of the 2023 F-150 Raptor R PSCM firmware ML3V-14D003-BC (EXE) and its calibration
-# PL3V-14D004-AA (DATA), cal base VBF 0x101C0470, reached at runtime as
-# control_block(_DAT_febe4238) -> +0x98 -> cal. Exec addresses are relative to base 0x00040000.
+# Read out of the PSCM firmware ML3V-14D003-BC (EXE) and its calibration PL3V-14D004-AA (DATA),
+# cal base VBF 0x101C0470, reached at runtime as control_block(_DAT_febe4238) -> +0x98 -> cal.
+# Exec addresses are relative to base 0x00040000.
+#
+# Provenance: this is the calibration off a 2023 F-150 Raptor R, dumped from that vehicle's own
+# module. It is not a reference platform or a related trim. Note that such a truck fingerprints as
+# CAR.FORD_F_150_MK14, which is a broad capture covering every F-150 trim, so the fingerprint says
+# nothing about which PSCM calibration is actually in the vehicle: a base F-150, a Lightning and a
+# Raptor R all land on the same platform enum. Treat these values as confirmed for a Raptor R and
+# unverified for anything else on that enum.
+#
 # Everything here is informational: it documents what the actuator does so the control constants
 # below can be reasoned about instead of purely road-fitted. Nothing in this block clamps a
-# command. The internal units of the cal values were never pinned to physical units, so they
-# describe envelope *shape and ordering*, not calibrated limits.
+# command, and no control constant is derived from one. The internal units of the cal values were
+# never pinned to physical units, so they describe envelope *shape and ordering*, not calibrated
+# limits, and that is true whether or not the vehicle matches. Pinning the units needs a sweep on
+# the truck, not more decompilation.
 #
 # Control loop
 PSCM_INTERNAL_RATE_HZ = 250.0     # FUN_0005dfb2, dt = 0.004. openpilot transmits at 20 Hz.
