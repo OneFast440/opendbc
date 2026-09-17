@@ -107,6 +107,61 @@ _BP_ANGLE_RATE_UP = ([5., 16., 25.], [0.0025, 0.0012, 0.00008])
 _BP_ANGLE_RATE_DOWN = ([5., 16., 25.], [0.0025, 0.0014, 0.00018])
 BP_ANGLE_LIMITS = AngleSteeringLimits(CURVATURE_MAX, _BP_ANGLE_RATE_UP, _BP_ANGLE_RATE_DOWN)
 
+# *** PSCM firmware ground truth ***
+#
+# Read out of the 2023 F-150 Raptor R PSCM firmware ML3V-14D003-BC (EXE) and its calibration
+# PL3V-14D004-AA (DATA), cal base VBF 0x101C0470, reached at runtime as
+# control_block(_DAT_febe4238) -> +0x98 -> cal. Exec addresses are relative to base 0x00040000.
+# Everything here is informational: it documents what the actuator does so the control constants
+# below can be reasoned about instead of purely road-fitted. Nothing in this block clamps a
+# command. The internal units of the cal values were never pinned to physical units, so they
+# describe envelope *shape and ordering*, not calibrated limits.
+#
+# Control loop
+PSCM_INTERNAL_RATE_HZ = 250.0     # FUN_0005dfb2, dt = 0.004. openpilot transmits at 20 Hz.
+# Output saturation, mode-independent fixed literals in FUN_0005e2a6. The primary command int16 at
+# gp-0xe474 clamps to +-1440; +-8.8 is cal +0x00; a secondary angle path (FUN_0005f13e) clamps to
+# +-8.0. These are where the actuator stops responding to a larger command, and they bite well
+# before the fault thresholds below.
+PSCM_OUTPUT_SAT_PRIMARY = 1440
+PSCM_OUTPUT_SAT_CAL = 8.8
+PSCM_OUTPUT_SAT_SECONDARY = 10.0
+PSCM_OUTPUT_SAT_ANGLE_PATH = 8.0
+# Slew limiter, FUN_0005dfb2: rate = (1 / cal) * 0.004 per 250 Hz tick. cal +0x40 = 1.8 winding up,
+# cal +0x44 = 1.3 unwinding. Which one applies is gated by an internal mode/direction state
+# (DAT_febed36b, written by the mode arbiter FUN_0005df34), NOT by the ramp_type we transmit.
+PSCM_SLEW_CAL_UP = 1.8
+PSCM_SLEW_CAL_DOWN = 1.3
+PSCM_SLEW_PER_S_UP = (1.0 / PSCM_SLEW_CAL_UP) * 0.004 * PSCM_INTERNAL_RATE_HZ      # 0.5556 /s
+PSCM_SLEW_PER_S_DOWN = (1.0 / PSCM_SLEW_CAL_DOWN) * 0.004 * PSCM_INTERNAL_RATE_HZ  # 0.7692 /s
+# The one structural fact that survives the unit gap: the module unwinds 38% faster than it winds
+# up. Any rate limit on our side that is tighter going down than coming up is fighting the
+# hardware's own asymmetry, not matching it.
+PSCM_SLEW_DOWN_UP_RATIO = PSCM_SLEW_PER_S_DOWN / PSCM_SLEW_PER_S_UP                # 1.385
+# Deadband, FUN_0005d7ca: fixed cal +0x2c / +0x30. Not gated on the precision_type we transmit.
+PSCM_DEADBAND_CAL = (110.0, 90.0)
+# Fault thresholds. Exceeding any trips a Dem fault and drops assist, so this is the outer
+# envelope, not a working limit. FUN_0005e042 (cal +0x08, two inputs), FUN_0005e0c4 (cal +0x10),
+# FUN_0005db6c (cal +0x20), FUN_0005dd1a (cal +0x1c).
+PSCM_FAULT_THRESHOLDS = (0.73, 7.0, 19.0, 20.0)
+# FUN_00093b2a forms the angle domain as curvature * speed * 572.95776e-6, and
+# 572.95776 = 10 * (180/pi). It scales with speed, which a steering-wheel angle would not
+# (delta ~= L*kappa), so path_angle is a path heading swept over a lookahead (kappa*v*t). This is
+# the firmware's own confirmation that `path_angle = kappa * v_ego * gain` in lateral_angle_ext is
+# the right shape: the gain absorbs the lookahead time and the per-platform compensation.
+PSCM_ANGLE_FROM_KAPPA_V = 572.95776e-6
+# ramp_type and precision_type do not retune the actuator in Limited mode: every consumer we read
+# uses fixed cal (slew above, deadband above), and the 0-3 enum that looked like a received
+# ramp_type (0xFEBE4916) is an outbound status the PSCM transmits, packed with a rolling counter
+# and checksum by FUN_000b1c96. Limited vs Extended is selected internally by FUN_000a7204 from
+# two RTE mode-condition flags, not from the LatCtl_D2_Rq we send, so Extended is not reachable
+# from the wire. We keep sending the same values we always have; nothing should be tuned on them.
+PSCM_RAMP_PRECISION_INERT_IN_LIMITED = True
+# The PSCM broadcasts LatCtlLim_D_Stat on Lane_Assist_Data3_FD1 (0x3CC), but on CAN FD in angle
+# mode it does not fire even while the module is attenuating delivery. That is why saturation has
+# to be observed from delivered-vs-commanded motion rather than read off the bus.
+PSCM_LIM_STAT_UNRELIABLE_CANFD = True
+
 # User-tunable values. (default, min, max) -- the single source of truth for the defaults and
 # clamps used by the settings UI, the sunnylink schema, and the control code.
 # angle mode

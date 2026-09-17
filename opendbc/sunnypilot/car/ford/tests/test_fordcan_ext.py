@@ -7,11 +7,10 @@ See the LICENSE.md file in the root directory for more details.
 import unittest
 
 from opendbc.can.packer import CANPacker
-from opendbc.can.parser import CANParser
 from opendbc.car import structs
 from opendbc.car.ford.carstate import CarState
 from opendbc.car.ford.fordcan import CanBus
-from opendbc.car.ford.values import CAR, CarControllerParams, DBC
+from opendbc.car.ford.values import CAR, DBC
 from opendbc.car import Bus
 from opendbc.sunnypilot.car.ford.fordcan_ext import (
   SHADOW_CURVATURE_MAX_RAW,

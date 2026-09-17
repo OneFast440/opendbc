@@ -84,6 +84,7 @@ class CarParamsSP:
     laneFullMode: bool = auto_field()
     customProfile: int = auto_field()
     lanePositioningGain: float = auto_field()
+    satObserver: bool = auto_field()
 
   @auto_dataclass
   class FordLongitudinalTuning:

@@ -212,6 +212,7 @@ def _initialize_ford(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_d
     lateral.highSpeedFactor = _clamp_tuning(params_dict.get("FordHighSpeedFactor_ang"), HIGH_SPEED_FACTOR_RANGE)
     lateral.highSpeedDampening = _clamp_tuning(params_dict.get("FordHighSpeedDampening_ang"), HIGH_SPEED_DAMPENING_RANGE)
     lateral.laneChangeFactor = _clamp_tuning(params_dict.get("FordLaneChangeFactor_ang"), LANE_CHANGE_FACTOR_RANGE)
+    lateral.satObserver = _bool_param(params_dict, "FordSatObserver_ang")
   elif mode == PrimaryLateralControl.curvature:
     lateral.humanTurnDetection = _bool_param(params_dict, "FordHumanTurnDetection_curv", True)
     lateral.laneChangeFactorCurv = _clamp_tuning(params_dict.get("FordLaneChangeFactor_curv"), LANE_CHANGE_FACTOR_CURV_RANGE)

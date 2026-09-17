@@ -23,6 +23,8 @@ executes the commanded angle directly, with no filter state to unwind.
 
 Background: https://bluepilot.dev/announcements/
 """
+from collections import deque
+
 from numpy import clip, interp
 
 from opendbc.car import DT_CTRL
@@ -85,6 +87,58 @@ _LANE_CHANGE_FACTOR_LOW = 0.95
 # longer in the curve is the cheaper failure.
 _PSCM_SAT_UNWIND_RATE = 0.02      # rad/call
 _DBC_SAT_FRACTION = 0.90          # fraction of the DBC limit that counts as saturated
+# Firmware cross-check (values_ext PSCM_SLEW_*): the module's own limiter unwinds 1.385x faster
+# than it winds up (cal 1.3 down vs 1.8 up). _PSCM_SAT_UNWIND_RATE goes the other way, capping the
+# decrease tighter than the wind-up the soft ROC below allows, because it is guarding the
+# command-vs-delivery gap that snaps on release, not tracking the module's slew. The cal units
+# were never pinned to physical units, so the two are not directly comparable and nothing here is
+# re-derived from them; if a sweep ever pins the units, this asymmetry is the first thing to
+# revisit.
+
+# *** delivered-vs-commanded saturation observer ***
+# The PSCM saturates its own output (firmware +-8.8 / +-10.0 / +-1440) and attenuates delivery
+# well before path_angle reaches the DBC limit, and it does not say so on the bus: LatCtlLim_D_Stat
+# is silent on CAN FD in angle mode. So _dbc_sat above fires late and the controller commands into
+# the attenuation region blind.
+#
+# Measure it instead: compare the curvature the car actually achieved against the curvature that
+# was commanded one actuator lag ago. An earlier attempt used angleState.saturated, which trips on
+# command-vs-actual lag, normal on any curve entry, and produced a positive-feedback flat line
+# (understeer -> saturated -> command frozen -> more understeer). Four things keep this one out of
+# that hole:
+#   * it compares against a delay-aligned command, so ordinary entry lag is not read as attenuation
+#   * the ratio is low-passed, then has to hold below threshold for a debounce before the flag sets
+#   * it runs hands-free only, above a speed floor, and only while commanding a real curve
+#   * it can only gate the saturation handling that already exists. It never adds command of its
+#     own, it clears on hysteresis, and a hard hold limit with a refractory period means a wrong
+#     ratio cannot freeze the command for a whole drive.
+#
+# The ratio is measured against the *requested* curvature, before the deviation clip, not against
+# the clipped kappa_cmd that goes out as path_angle. That is deliberate and it is not what the
+# handoff suggested. The clip pins kappa_cmd at measured + CURVATURE_ERROR whenever the command
+# leads the car, which puts an algebraic floor of m / (m + 0.002) under any post-clip ratio: 0.83
+# at a 100 m radius, 0.91 at 50 m. A post-clip observer therefore cannot see attenuation at
+# exactly the curvatures where the PSCM attenuates. Requested-vs-delivered asks the question that
+# matters anyway -- how much of what the planner wanted did the truck actually do -- and it counts
+# the clip's own throttling, which the saturation handling should respond to for the same reason.
+_SAT_OBS_LAG_S = 0.20             # actuator lag the comparison aligns to
+_SAT_OBS_MIN_KAPPA = 0.004        # 1/m -- inside a 250 m radius; below this the ratio is noise
+_SAT_OBS_MIN_SPEED = 5.0          # m/s -- yaw rate over speed is not meaningful below this
+_SAT_OBS_TAU_S = 0.50             # low-pass on the delivery ratio
+_SAT_OBS_ENTER = 0.75             # delivered/requested below this counts as attenuating
+_SAT_OBS_EXIT = 0.85              # and must come back above this to clear (hysteresis)
+_SAT_OBS_DEBOUNCE_S = 0.50        # how long it must hold below before the flag sets
+# Curve entry is the one place a low ratio is honest and meaningless: the request is climbing and
+# the car has not caught up yet. That is the lag the old angleState.saturated attempt mistook for
+# saturation. Rather than trying to out-filter it, the debounce simply does not accumulate while
+# the request is still growing. Attenuation is a problem at and after the apex, which is exactly
+# where this gate opens.
+_SAT_OBS_RISING_EPS = 1e-4        # 1/m per call below which "still growing" is just noise
+_SAT_OBS_MAX_HOLD_S = 10.0        # hard release; longer than any real corner, short of a latch
+_SAT_OBS_REFRACTORY_S = 1.0       # after a hard release, before it may arm again
+_SAT_OBS_RATIO_NEUTRAL = 1.0      # what the filter holds while gated, i.e. "delivering fine"
+_SAT_OBS_RATIO_MAX = 2.0          # clamp, so one bad frame cannot drag the filter far
+_SAT_OBS_LAG_FRAMES = max(1, round(_SAT_OBS_LAG_S / _STEER_DT))
 
 # Soft rate-of-change limit on path_angle, per lateral call (20 Hz). Deliberately slightly
 # tighter than the panda mirror in safety/modes/ford.h so openpilot never provokes a block.
@@ -163,11 +217,91 @@ class LateralAngleExt:
 
     self.lane_change = False
 
+    # Delivered-vs-commanded saturation observer. Default off: this is live steering code and the
+    # thresholds below are road-validated on one truck, not derived from the firmware.
+    self.sat_observer_enabled = bool(tuning.satObserver)
+    self.kappa_req_history: deque[float] = deque(maxlen=_SAT_OBS_LAG_FRAMES + 1)
+    self.kappa_req_last = 0.0
+    self.delivery_ratio = _SAT_OBS_RATIO_NEUTRAL
+    self.pscm_attenuating = False
+    self.sat_obs_below_s = 0.0
+    self.sat_obs_hold_s = 0.0
+    self.sat_obs_refractory_s = 0.0
+
+  def _clear_saturation_observer(self) -> None:
+    """Back to "delivering fine". Every path that puts mode 0 on the wire lands here: the PSCM's
+    authority resets with the mode drop, so a ratio measured before it says nothing after it."""
+    self.kappa_req_history.clear()
+    self.kappa_req_last = 0.0
+    self.delivery_ratio = _SAT_OBS_RATIO_NEUTRAL
+    self.pscm_attenuating = False
+    self.sat_obs_below_s = 0.0
+    self.sat_obs_hold_s = 0.0
+
+  def _update_saturation_observer(self, CS, v_ego: float, kappa_req: float) -> None:
+    """Fold this frame into the delivery-ratio filter and set the attenuating flag.
+
+    Runs at the end of the frame, so the flag is read one 20 Hz tick later. Against a 0.5 s
+    low-pass and a 0.5 s debounce, 50 ms of staleness does not matter, and computing it here is
+    what lets the comparison use the request this frame actually produced."""
+    self.sat_obs_refractory_s = max(0.0, self.sat_obs_refractory_s - _STEER_DT)
+
+    # Hands-free only, and only while the command means something. Everything in this list either
+    # moves the measurement independently of our command (driver) or deliberately drops the mode
+    # (blip), both of which make the ratio meaningless rather than low.
+    if (CS.out.steeringPressed or self.human_turn_active or self.lane_change
+        or self.stall_blip_active or v_ego < _SAT_OBS_MIN_SPEED):
+      self._clear_saturation_observer()
+      return
+
+    rising = abs(kappa_req) > abs(self.kappa_req_last) + _SAT_OBS_RISING_EPS
+    self.kappa_req_last = kappa_req
+
+    self.kappa_req_history.append(kappa_req)
+    if len(self.kappa_req_history) < self.kappa_req_history.maxlen:
+      return
+
+    # Delay-aligned: what the car is doing now against what was asked for one actuator lag ago.
+    # This is the difference between measuring attenuation and measuring ordinary entry lag.
+    kappa_then = self.kappa_req_history[0]
+    kappa_now = get_current_curvature(CS)
+    alpha = _STEER_DT / (_SAT_OBS_TAU_S + _STEER_DT)
+    if abs(kappa_then) >= _SAT_OBS_MIN_KAPPA and kappa_then * kappa_now > 0.0:
+      ratio = float(clip(kappa_now / kappa_then, 0.0, _SAT_OBS_RATIO_MAX))
+      self.delivery_ratio += alpha * (ratio - self.delivery_ratio)
+    else:
+      # Not asking for a real curve, or the car is going the other way: decay back toward neutral
+      # rather than carrying a stale ratio into the next curve.
+      self.delivery_ratio += alpha * (_SAT_OBS_RATIO_NEUTRAL - self.delivery_ratio)
+
+    if self.delivery_ratio < _SAT_OBS_ENTER and not rising:
+      self.sat_obs_below_s += _STEER_DT
+    elif self.delivery_ratio > _SAT_OBS_EXIT:
+      self.sat_obs_below_s = 0.0
+
+    if self.pscm_attenuating:
+      self.sat_obs_hold_s += _STEER_DT
+      if self.delivery_ratio > _SAT_OBS_EXIT:
+        self.pscm_attenuating = False
+        self.sat_obs_below_s = 0.0
+        self.sat_obs_hold_s = 0.0
+      elif self.sat_obs_hold_s >= _SAT_OBS_MAX_HOLD_S:
+        # Longer than any real corner. Whatever is driving the ratio down is not something this
+        # observer should keep freezing the command over, so let go and make it re-earn the flag.
+        self.pscm_attenuating = False
+        self.sat_obs_below_s = 0.0
+        self.sat_obs_hold_s = 0.0
+        self.sat_obs_refractory_s = _SAT_OBS_REFRACTORY_S
+    elif self.sat_obs_below_s >= _SAT_OBS_DEBOUNCE_S and self.sat_obs_refractory_s <= 0.0:
+      self.pscm_attenuating = True
+      self.sat_obs_hold_s = 0.0
+
   def _reset(self, CS, actuators=None) -> FordLateralResult:
     """Zero the command and publish a truthful shadow. Used by the inactive, human-turn and
     stall-blip paths, which all put mode 0 on the wire."""
     self.path_angle_last = 0.0
     self.curvature_deviation_limited = False
+    self._clear_saturation_observer()
     # Lane_Assist_Data1 carries the shadow at 33 Hz whenever angle mode is configured, and the
     # panda latches it from every such frame regardless of whether lateral is active. Parking it
     # at a stale zero would make the first enabled LMC frame after re-engage race that latch
@@ -246,14 +380,18 @@ class LateralAngleExt:
     predicted_curvature = float(interp(lookup_time, T_IDXS, model_curvatures)) if have_model else 0.0
 
     # *** exit-biased blend ***
-    # Only the DBC-limit proximity counts as saturation here. LatCtlLim_D_Stat does not fire in
-    # angle mode, and angleState.saturated is useless as a proxy: it trips whenever the car lags
-    # the commanded path_angle by > 2.5 deg, i.e. on any normal curve entry, which produced a
+    # Saturation has two sources. DBC-limit proximity is the hard backstop and is always on, but
+    # it fires late: the PSCM attenuates delivery long before path_angle reaches the CAN limit and
+    # does not report it (LatCtlLim_D_Stat is silent on CAN FD in angle mode). The observer is the
+    # early one, measured from delivered-vs-commanded curvature, and is off unless the driver
+    # enables it. angleState.saturated is not used as a proxy for either: it trips whenever the car
+    # lags the commanded path_angle by > 2.5 deg, i.e. on any normal curve entry, which produced a
     # positive-feedback flat line (understeer -> saturated -> path_angle frozen -> more understeer).
     dbc_saturated = (self.path_angle_last >= FORD_DBC_PATH_ANGLE_MAX * _DBC_SAT_FRACTION or
                      self.path_angle_last <= FORD_DBC_PATH_ANGLE_MIN * _DBC_SAT_FRACTION)
+    saturated = dbc_saturated or (self.sat_observer_enabled and self.pscm_attenuating)
     desired_falling = abs(desired_curvature) < abs(self.desired_curvature_last) - _EXIT_DESIRED_FALLING
-    on_exit = not kappa_entering and (dbc_saturated or desired_falling)
+    on_exit = not kappa_entering and (saturated or desired_falling)
     blend = _PATH_ANGLE_BLEND_RATIO * _EXIT_BLEND_SCALE if on_exit else _PATH_ANGLE_BLEND_RATIO
     requested_curvature = predicted_curvature * blend + desired_curvature * (1.0 - blend)
     self.desired_curvature_last = desired_curvature
@@ -302,7 +440,7 @@ class LateralAngleExt:
     path_angle = kappa_cmd * v_ego * gain
 
     # *** saturation handling ***
-    if dbc_saturated:
+    if saturated:
       last_mag = abs(self.path_angle_last)
       if abs(path_angle) > last_mag:
         path_angle = self.path_angle_last                      # magnitude growing: block
@@ -323,6 +461,7 @@ class LateralAngleExt:
     # The honest command during a press is the driver's actual curvature.
     self.shadow_curvature = current_curvature if CS.out.steeringPressed else kappa_cmd
 
+    self._update_saturation_observer(CS, v_ego, float(requested_curvature))
     self._update_stall_detection(CS, desired_curvature, current_curvature)
 
     return FordLateralResult(
@@ -330,6 +469,11 @@ class LateralAngleExt:
       curvature_rate=0.0,
       path_offset=0.0,
       path_angle=path_angle,
+      # Inert in Limited mode: the PSCM's slew rate and deadband are fixed calibration
+      # (values_ext PSCM_SLEW_*, PSCM_DEADBAND_CAL) and no consumer of a received ramp or
+      # precision request selects either. These values are kept exactly as they have always been
+      # transmitted so the wire is unchanged, but nothing should be tuned on them, and `precision`
+      # above is a lane-change marker rather than a request the module acts on.
       ramp_type=2,
       precision_type=precision,
       lat_inactive=False,
