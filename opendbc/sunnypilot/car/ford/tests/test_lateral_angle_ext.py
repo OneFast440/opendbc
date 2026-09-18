@@ -245,3 +245,63 @@ class TestLateralAngleExt(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
+
+
+class TestAngleModeCommandFidelity(unittest.TestCase):
+  """Angle mode must follow carControl as closely as its own actuator limits allow.
+
+  Both cases here were found in a logged 15 m radius corner (route 0000000a, segment 12, t=757-762)
+  where latActive stayed true the whole way through and the panda blocked nothing, yet the command
+  on the wire did not follow carControl.
+  """
+
+  @staticmethod
+  def _drive(ctrl, frames, curvature, v_ego, pressed=False, angle=0.0):
+    cc = make_cc(lat_active=True, curvature=curvature)
+    cc_sp = make_cc_sp(model_curvature=curvature)
+    res = None
+    for _ in range(frames):
+      cs = make_cs(v_ego=v_ego, steering_pressed=pressed, steering_angle=angle)
+      res = ctrl.update(cc, cc_sp, cs, make_actuators(curvature=curvature))
+    return res
+
+  def test_tight_corner_is_not_capped_by_the_curvature_signal_range(self):
+    """CURVATURE_MAX bounds c2. Angle mode steers with c1, so it must not inherit that ceiling."""
+    v_ego, kappa = 7.0, 0.0667            # 15 m radius, the logged corner
+    ctrl = LateralAngleExt(*angle_params())
+    res = self._drive(ctrl, 60, kappa, v_ego)
+    capped = 0.02 * v_ego                 # what the old clamp allowed, before gain
+    self.assertGreater(abs(res.path_angle), capped,
+                       "command still capped at the c2 signal range")
+
+  def test_the_command_still_respects_its_own_signal_range(self):
+    """Removing the c2 clamp must not let c1 leave its own range."""
+    ctrl = LateralAngleExt(*angle_params())
+    res = self._drive(ctrl, 200, 0.5, 25.0)   # absurd request, on purpose
+    self.assertLessEqual(res.path_angle, FORD_DBC_PATH_ANGLE_MAX + 1e-9)
+    self.assertGreaterEqual(res.path_angle, FORD_DBC_PATH_ANGLE_MIN - 1e-9)
+
+  def test_gentle_curves_are_unchanged(self):
+    """The clamp only ever bound past 0.02 1/m, so nothing below it may move."""
+    for kappa in (0.001, 0.005, 0.010, 0.019):
+      with self.subTest(kappa=kappa):
+        ctrl = LateralAngleExt(*angle_params())
+        res = self._drive(ctrl, 60, kappa, 20.0)
+        expected = LateralAngleExt(*angle_params())
+        want = self._drive(expected, 60, kappa, 20.0)
+        self.assertAlmostEqual(res.path_angle, want.path_angle, places=9)
+
+  def test_human_turn_override_is_on_by_default(self):
+    ctrl = LateralAngleExt(*angle_params())
+    self.assertTrue(ctrl.human_turn_detection)
+    self._drive(ctrl, int(HUMAN_TURN_HOLD_PRETURNED_S / STEER_DT) + 20, 0.02, 7.0, pressed=True, angle=-120.0)
+    self.assertTrue(ctrl.human_turn_active)
+
+  def test_human_turn_override_can_be_turned_off(self):
+    """The setting used to be curvature-mode only in practice; angle mode hard-wired it on."""
+    ctrl = LateralAngleExt(*angle_params(human_turn_detection=False))
+    self.assertFalse(ctrl.human_turn_detection)
+    res = self._drive(ctrl, int(HUMAN_TURN_HOLD_PRETURNED_S / STEER_DT) + 20, 0.02, 7.0, pressed=True, angle=-120.0)
+    self.assertFalse(ctrl.human_turn_active)
+    self.assertFalse(res.lat_inactive, "lateral was handed back despite the override being off")
+    self.assertNotEqual(res.path_angle, 0.0, "no command while carControl still wants lateral")

@@ -32,7 +32,6 @@ from opendbc.car.ford.values import CarControllerParams
 from opendbc.sunnypilot.car.ford.human_turn import HumanTurnDetector
 from opendbc.sunnypilot.car.ford.lateral_common import INACTIVE_RESULT, FordLateralResult, get_current_curvature
 from opendbc.sunnypilot.car.ford.values_ext import (
-  CURVATURE_MAX,
   FORD_DBC_PATH_ANGLE_MAX,
   FORD_DBC_PATH_ANGLE_MIN,
   HIGH_SPEED_DAMPENING_RANGE,
@@ -201,6 +200,12 @@ class LateralAngleExt:
     self.high_speed_factor = _tuned(tuning.highSpeedFactor, HIGH_SPEED_FACTOR_RANGE)
     self.high_speed_dampening = _tuned(tuning.highSpeedDampening, HIGH_SPEED_DAMPENING_RANGE)
     self.lane_change_factor_high = _tuned(tuning.laneChangeFactor, LANE_CHANGE_FACTOR_RANGE)
+    # Hand lateral back while the driver holds a real turn. Was hard-wired on here, which made the
+    # setting a curvature-mode-only control in practice and cost a 2.5 s dropout in the middle of a
+    # 15 m radius corner on a logged drive (s12 t=759.6, wheel at -241 deg, latActive throughout).
+    # It stays on by default, because the PSCM re-engage stall it prevents is real, but it is the
+    # driver's call now.
+    self.human_turn_detection = bool(tuning.humanTurnDetection)
 
     self.path_angle_last = 0.0
     self.desired_curvature_last = 0.0
@@ -341,10 +346,12 @@ class LateralAngleExt:
       return self._reset(CS)
 
     # Human-turn override: a sustained driver press at a large wheel angle forces lateral
-    # inactive so path_angle cannot wind into a stale command while the driver turns. Always on
-    # in angle mode -- the PSCM re-engage stall it prevents is not something to opt out of. On
-    # release path_angle ramps back in from zero through the soft ROC; no seeding, no bypass.
-    self.human_turn_active = self.human_turn_detector.update(True, CS.out.steeringPressed, CS.out.steeringAngleDeg)
+    # inactive so path_angle cannot wind into a stale command while the driver turns. On release
+    # path_angle ramps back in from zero through the soft ROC; no seeding, no bypass. Under the
+    # driver's control, because handing lateral back mid-corner is the single largest deviation
+    # from carControl this controller can make.
+    self.human_turn_active = self.human_turn_detector.update(self.human_turn_detection, CS.out.steeringPressed,
+                                                             CS.out.steeringAngleDeg)
     if self.human_turn_active:
       # A human turn ends any stall episode: its own mode 0 does the PSCM reset job. That also
       # covers the press so far, so only press time after the latch releases earns a hand-off pulse.
@@ -431,11 +438,14 @@ class LateralAngleExt:
                              current_curvature + CarControllerParams.CURVATURE_ERROR))
       self.curvature_deviation_limited = abs(kappa_cmd - kappa_pre_clip) > 1e-9
 
-    # The DBC's own curvature range is the only absolute bound here: BluePilot does not apply the
-    # ISO lateral acceleration ceiling in angle mode, and neither does the panda's shadow check.
-    # What bounds the actuator is path_angle's own range and rate limit further down, plus the
-    # deviation clip above.
-    kappa_cmd = float(clip(kappa_cmd, -CURVATURE_MAX, CURVATURE_MAX))
+    # No curvature clamp here, deliberately. CURVATURE_MAX is the range of the c2 signal, and angle
+    # mode does not steer with c2: it steers with c1, which has its own range (FORD_DBC_PATH_ANGLE_*)
+    # and its own rate limit, both applied below and both mirrored by the panda. Clamping the
+    # intent at 0.02 1/m capped path_angle at 0.02 * v * gain no matter how tight the corner, which
+    # on a logged 15 m radius turn held the command at 34% of what carControl asked for while the
+    # PSCM was still following. BluePilot does not clamp here either. The value that does go to the
+    # panda as shadow_curvature is saturated at the limit on the wire, in create_lka_msg, so the
+    # safety check still sees an in-range number without the actuator inheriting the c2 ceiling.
 
     # *** kappa -> path_angle ***
     low_gain = float(interp(v_ego, _GAIN_SPEED_BP,
