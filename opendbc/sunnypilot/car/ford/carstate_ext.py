@@ -33,10 +33,28 @@ COMBO_BUTTONS = {
 SIMPLE_BUTTONS = {b.can_msg: b for b in BUTTONS if b.can_msg not in COMBO_BUTTONS}
 
 
+# Brake lamp sources, in the order they are tried. Registered alive-exempt (NaN rate) rather than
+# with a declared rate: this is a cosmetic indicator, and nothing cosmetic should be able to put
+# canValid down and disengage the car. Declaring a rate instead costs about half a second of
+# invalid CAN at every startup while the 1Hz source is waited for, and leaves the door open to the
+# same staleness class of bug that IPMA_Data hit (see get_can_parsers in
+# opendbc/car/ford/carstate.py). The cost of the exemption is that a dead source reads as "lamps
+# last seen off" instead of raising an error, which for an indicator is the right trade.
+#
+# Measured on a 2023 F-150 Raptor R across two drives: BrakeSysFeatures_2.BrkLamp_B_Rq never went
+# high at all, through 399 frames of openpilot brake requests and plenty of driver braking, while
+# BCM_Lamp_Stat_FD1.StopLghtOn_B_Stat was high for 83% of those same openpilot brake frames. So
+# the slow message is the one that carries the signal on this platform and the fast one is dead.
+# BCM only transmits at about 1.1Hz, which is the real limit on this indicator: it is a coarse
+# "are the lamps lit" readout, and it can lag the lamps by up to a second.
+BRAKE_LAMP_MSGS = (("BCM_Lamp_Stat_FD1", float("nan")), ("BrakeSysFeatures_2", float("nan")))
+
+
 class CarStateExt:
   def __init__(self, CP, CP_SP):
     self.CP = CP
     self.CP_SP = CP_SP
+    self.brake_lamp_source: str | None = None
 
     self.pressed = dict.fromkeys({b.can_msg for b in BUTTONS}, False)
     # What a combo button reported when it went down, so its release matches.
@@ -87,3 +105,37 @@ class CarStateExt:
 
     self.cruise_enabled_last = cruise_enabled
     ret.buttonEvents = list(ret.buttonEvents) + events
+
+    if self.CP_SP.fordHud.brakeLightStatus:
+      self._update_brake_lights(ret_sp, cp)
+
+  def _update_brake_lights(self, ret_sp: structs.CarStateSP, cp: CANParser) -> None:
+    """Report whether the vehicle's brake lamps are lit.
+
+    Read off the bus rather than inferred from openpilot's own braking, because the lamps also
+    light for the driver, for regen and for the stock ACC. There is deliberately no overlay of
+    openpilot's brake request here: with openpilot longitudinal enabled the camera's ACCDATA
+    carries the stock system's intent, not ours, so folding it in would light the indicator for a
+    deceleration that is not happening.
+    """
+    status = ret_sp.fordBrakeLights
+    lit: bool | None = None
+
+    values = cp.vl["BCM_Lamp_Stat_FD1"]
+    if "StopLghtOn_B_Stat" in values:
+      lit = bool(values["StopLghtOn_B_Stat"])
+      self.brake_lamp_source = "BCM_Lamp_Stat_FD1"
+    else:
+      values = cp.vl["BrakeSysFeatures_2"]
+      if "BrkLamp_B_Rq" in values:
+        lit = values["BrkLamp_B_Rq"] == 1
+        self.brake_lamp_source = "BrakeSysFeatures_2"
+
+    if lit is None:
+      self.brake_lamp_source = None
+      status.dataAvailable = False
+      status.brakeLightsOn = False
+      return
+
+    status.dataAvailable = True
+    status.brakeLightsOn = lit

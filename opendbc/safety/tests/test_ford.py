@@ -838,6 +838,49 @@ class TestFordAngleControlSafetyBase(FordBluePilotSafetyHarness):
         self.assertEqual(abs(delta) <= self.MAX_CURVATURE_ERROR, self._tx(self._lat_ctl_msg(True, 0.0)),
                          f"measured {measured} shadow {shadow}")
 
+  def test_deviation_band_clamps_the_measurement_to_the_commandable_range(self):
+    """A corner tighter than max_curvature above the band's speed floor must still be steerable.
+
+    openpilot cannot command more curvature than max_curvature, so once the car is genuinely
+    turning tighter than that the command is simply capped and the measurement is not. Comparing
+    the two unclamped fails on the difference between the cap and reality, every frame, for the
+    length of the corner. Regression: an earlier pass fixed the absolute-limit half of this and
+    moved the block from low speed onto anything above CURVATURE_ERROR_MIN_SPEED.
+    """
+    speed = self.CURVATURE_ERROR_MIN_SPEED + 5.0
+    for sign in (1, -1):
+      for measured in (self.MAX_CURVATURE * 1.15, self.MAX_CURVATURE * 1.5, self.MAX_CURVATURE * 2.0):
+        with self.subTest(measured=sign * measured):
+          # the command is capped at the limit; the car is doing more than that
+          self._engage(speed, curvature=sign * measured, shadow=sign * self.MAX_CURVATURE)
+          self.assertTrue(self._tx(self._lat_ctl_msg(True, 0.0)),
+                          f"capped command blocked while measuring {sign * measured}")
+
+  def test_deviation_band_still_catches_a_runaway_command(self):
+    """The clamp must not cost the check its purpose: a command that leaves the measurement still
+    has to be blocked, in both directions and both signs."""
+    speed = self.CURVATURE_ERROR_MIN_SPEED + 5.0
+    over = self.MAX_CURVATURE_ERROR * 3.0
+    for measured, shadow in ((0.001, 0.001 + over), (0.001, 0.001 - over),
+                             (0.010, 0.010 + over), (0.010, 0.010 - over),
+                             (-0.010, -0.010 - over), (-0.010, -0.010 + over),
+                             (0.012, -0.012), (-0.012, 0.012)):
+        with self.subTest(measured=measured, shadow=shadow):
+          self._engage(speed, curvature=measured, shadow=shadow)
+          self.assertFalse(self._tx(self._lat_ctl_msg(True, 0.0)),
+                           f"runaway command allowed: measured {measured} shadow {shadow}")
+
+  def test_deviation_band_clamp_is_symmetric(self):
+    """Covers both arms of the clamp: a hard right pins the band at +max, a hard left at -max."""
+    speed = self.CURVATURE_ERROR_MIN_SPEED + 5.0
+    huge = self.MAX_CURVATURE * 3.0
+    for sign in (1, -1):
+      # measurement far outside the range, command at the far side of the range: still blocked,
+      # because the clamp pins the band at the near limit rather than following the measurement
+      self._engage(speed, curvature=sign * huge, shadow=-sign * self.MAX_CURVATURE)
+      self.assertFalse(self._tx(self._lat_ctl_msg(True, 0.0)),
+                       f"opposite-sign command allowed while measuring {sign * huge}")
+
   def test_deviation_band_unchecked_below_min_speed(self):
     speed = self.CURVATURE_ERROR_MIN_SPEED - 2.0
     self._engage(speed, curvature=0.0, shadow=0.015)

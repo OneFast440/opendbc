@@ -95,6 +95,7 @@ class CarParamsSP:
   class FordHud:
     handsFreeClusterMsg: bool = auto_field()
     driverMonitorCanMsg: bool = auto_field()
+    brakeLightStatus: bool = auto_field()
 
   @auto_dataclass
   class NeuralNetworkLateralControl:
@@ -210,4 +211,10 @@ class CarControlSP:
 
 @auto_dataclass
 class CarStateSP:
+  @auto_dataclass
+  class FordBrakeLights:
+    dataAvailable: bool = auto_field()
+    brakeLightsOn: bool = auto_field()
+
   speedLimit: float = auto_field()
+  fordBrakeLights: FordBrakeLights = auto_field()

@@ -201,6 +201,17 @@ static bool ford_path_angle_cmd_checks(int desired_path_angle, bool steer_contro
 //
 // The ISO lateral acceleration ceiling is not applied here either, for the same reason it is not
 // applied to c2 in curvature mode: see FORD_BP_CURVATURE_ROC in ford_curvature_cmd_checks below.
+static int ford_clamp_curvature(int value, int limit) {
+  int ret = value;
+  if (ret > limit) {
+    ret = limit;
+  }
+  if (ret < -limit) {
+    ret = -limit;
+  }
+  return ret;
+}
+
 static bool ford_shadow_curvature_checks(int shadow_curvature, bool steer_control_enabled,
                                          const CurvatureSteeringLimits limits) {
   bool violation = false;
@@ -210,8 +221,19 @@ static bool ford_shadow_curvature_checks(int shadow_curvature, bool steer_contro
 
     if ((limits.max_curvature_error != 0) &&
         ((vehicle_speed.values[0] / VEHICLE_SPEED_FACTOR) > limits.curvature_error_min_speed)) {
-      const int lowest_allowed = curvature_state.meas.min - limits.max_curvature_error - 1;
-      const int highest_allowed = curvature_state.meas.max + limits.max_curvature_error + 1;
+      // Compare against the measurement clamped into the range a command could have produced.
+      // openpilot cannot ask for more curvature than max_curvature, so whenever the car is
+      // actually turning tighter than that -- a tight corner or an on-ramp, where the measurement
+      // is honest and the command is simply capped -- an unclamped band would fail on the
+      // difference between the cap and reality, every frame, for the length of the corner. The
+      // clamp removes that while leaving the check it exists for intact: a command that runs away
+      // from what the car is doing still falls outside the band, in either direction and either
+      // sign, because only the measured side is clamped and the commanded side is still held to
+      // max_curvature by the check above.
+      const int meas_min = ford_clamp_curvature(curvature_state.meas.min, limits.max_curvature);
+      const int meas_max = ford_clamp_curvature(curvature_state.meas.max, limits.max_curvature);
+      const int lowest_allowed = meas_min - limits.max_curvature_error - 1;
+      const int highest_allowed = meas_max + limits.max_curvature_error + 1;
       violation |= safety_max_limit_check(shadow_curvature, highest_allowed, lowest_allowed);
     }
   }

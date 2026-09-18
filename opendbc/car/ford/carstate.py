@@ -5,7 +5,7 @@ from opendbc.car.ford.fordcan import CanBus
 from opendbc.car.ford.values import DBC, CarControllerParams, FordFlags
 from opendbc.car.interfaces import CarStateBase
 
-from opendbc.sunnypilot.car.ford.carstate_ext import CarStateExt
+from opendbc.sunnypilot.car.ford.carstate_ext import BRAKE_LAMP_MSGS, CarStateExt
 from opendbc.sunnypilot.car.ford.mads import MadsCarState
 
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -126,7 +126,7 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
     return ret, ret_sp
 
   @staticmethod
-  def get_can_parsers(CP, CP_SP):
+  def _get_can_parsers(CP, CP_SP):
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).main),
       # sunnypilot: IPMA_Data's rate is declared rather than learned. Every other message here is
@@ -135,7 +135,19 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
       # LKAS_UI_STEP), and a startup burst makes the parser infer something like 12Hz, which sets
       # a timeout under a second. From then on the message is stale for the last fraction of every
       # 1Hz gap, canValid drops, and selfdrived raises canError -- an IMMEDIATE_DISABLE, once a
-      # second, for the rest of the drive, over a passthrough UI message. Observed on a 2024 F-150:
+      # second, for the rest of the drive, over a passthrough UI message. Observed on a 2023 Raptor R:
       # a measured 0.85s timeout against a camera sending a metronomic 1.00Hz.
       Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [("IPMA_Data", 1)], CanBus(CP).camera),
     }
+
+  @staticmethod
+  def get_can_parsers(CP, CP_SP):
+    parsers = CarState._get_can_parsers(CP, CP_SP)
+    # sunnypilot: the brake lamp sources are registered only when the indicator is on, and
+    # alive-exempt when they are, so a cosmetic readout can never take canValid down. Registering
+    # a message this parser would otherwise never touch would otherwise put its cadence into
+    # canValid for every Ford. See BRAKE_LAMP_MSGS.
+    if CP.brand == 'ford' and CP_SP.fordHud.brakeLightStatus:
+      for name, freq in BRAKE_LAMP_MSGS:
+        parsers[Bus.pt]._add_message(name, freq)
+    return parsers

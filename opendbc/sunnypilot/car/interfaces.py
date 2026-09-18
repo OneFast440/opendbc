@@ -232,6 +232,7 @@ def _initialize_ford(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_d
 
   CP_SP.fordHud.handsFreeClusterMsg = _bool_param(params_dict, "FordHandsFreeClusterMsg")
   CP_SP.fordHud.driverMonitorCanMsg = _bool_param(params_dict, "FordDriverMonitorCanMsg")
+  CP_SP.fordHud.brakeLightStatus = _bool_param(params_dict, "FordBrakeLightStatus")
 
 
 def _initialize_toyota(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_dict: dict[str, str]) -> None:
