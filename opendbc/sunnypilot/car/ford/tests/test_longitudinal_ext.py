@@ -7,12 +7,19 @@ See the LICENSE.md file in the root directory for more details.
 import unittest
 
 from opendbc.car.ford.values import CarControllerParams
-from opendbc.sunnypilot.car.ford.longitudinal_ext import (MS_TO_MPH, _GAS_CREEP_SPEED, _GAS_RELEASE,
-                                                          LongitudinalExt)
+from opendbc.sunnypilot.car.ford.longitudinal_ext import (MS_TO_MPH, _BRAKE_ENGAGE, _BRAKE_RELEASE,
+                                                          _GAS_CREEP_SPEED, _GAS_RELEASE,
+                                                          _PRECHARGE_ENGAGE, LongitudinalExt)
 from opendbc.sunnypilot.car.ford.tests.helpers import make_car_params, make_cc, make_cc_sp, make_cs, make_lead
 
 HIGHWAY_MS = 60.0 / MS_TO_MPH
 URBAN_MS = 30.0 / MS_TO_MPH
+
+# Expressed against the thresholds rather than hard coded, so a retune does not silently
+# turn these into tests of something else.
+BRAKING = _BRAKE_ENGAGE - 0.05                      # past engage
+COASTING = (_BRAKE_ENGAGE + _BRAKE_RELEASE) / 2     # inside the band
+PRECHARGE_ONLY = (_PRECHARGE_ENGAGE + _BRAKE_ENGAGE) / 2
 
 
 class TestLongitudinalExt(unittest.TestCase):
@@ -129,19 +136,43 @@ class TestLongitudinalExt(unittest.TestCase):
 
   def test_brake_hysteresis(self):
     lng = self._build(follow_control=False)
-    self.assertFalse(self._step(lng, op_accel=-0.10).brake_actuate)  # inside the band
-    self.assertTrue(self._step(lng, op_accel=-0.20).brake_actuate)   # past engage
-    self.assertTrue(self._step(lng, op_accel=-0.10).brake_actuate)   # holds inside the band
-    self.assertFalse(self._step(lng, op_accel=0.0).brake_actuate)    # past release
+    self.assertFalse(self._step(lng, op_accel=COASTING).brake_actuate)  # inside the band
+    self.assertTrue(self._step(lng, op_accel=BRAKING).brake_actuate)    # past engage
+    self.assertTrue(self._step(lng, op_accel=COASTING).brake_actuate)   # holds inside the band
+    self.assertFalse(self._step(lng, op_accel=0.0).brake_actuate)       # past release
+
+  def test_the_brakes_stay_out_of_what_the_engine_can_do(self):
+    """A request the closed throttle can deliver must not reach for the friction brakes,
+    because that lights the lamp at the car behind for nothing."""
+    lng = self._build(follow_control=False)
+    for accel in (-0.10, -0.20, -0.30, -0.40):
+      lng = self._build(follow_control=False)
+      self.assertFalse(self._step(lng, op_accel=accel, op_gas=accel).brake_actuate, accel)
+    self.assertLessEqual(_BRAKE_ENGAGE, CarControllerParams.MIN_GAS)
 
   def test_precharge_engages_before_the_brakes(self):
     lng = self._build()
     lead = make_lead(status=True, d_rel=HIGHWAY_MS * 2.0, v_rel=0.0, v_lead=HIGHWAY_MS)
     self._settle_speed(lng, lead=lead)
     lng.accel_last = -1.0  # already braking, so the ease-in limiter is not what decides
-    result = self._step(lng, op_accel=-0.13, op_gas=0.0, lead=lead)
+    result = self._step(lng, op_accel=PRECHARGE_ONLY, op_gas=0.0, lead=lead)
     self.assertTrue(result.precharge_actuate)
     self.assertFalse(result.brake_actuate)
+
+  def test_never_brakes_against_the_driver_accelerator(self):
+    """With the accelerator override held, openpilot keeps commanding through the press, so
+    it must not put the brakes on under the driver's foot."""
+    lng = self._build(follow_control=False)
+    self._step(lng, op_accel=BRAKING, op_gas=BRAKING)     # latch the brake request on
+    self.assertTrue(lng.brake_actuate_last)
+    result = self._step(lng, op_accel=-2.0, op_gas=-2.0, gas_pressed=True)
+    self.assertFalse(result.brake_actuate)
+    self.assertFalse(result.precharge_actuate)
+
+  def test_driver_accelerator_does_not_latch_the_brake_request(self):
+    lng = self._build(follow_control=False)
+    self._step(lng, op_accel=-2.0, op_gas=-2.0, gas_pressed=True)
+    self.assertFalse(lng.brake_actuate_last)
 
   def test_braking_never_asks_for_throttle(self):
     lng = self._build(follow_control=False)
@@ -152,7 +183,7 @@ class TestLongitudinalExt(unittest.TestCase):
   def test_a_gentle_coast_stays_on_the_gas_channel(self):
     """The request the planner made, not a release to full engine braking."""
     lng = self._build(follow_control=False)
-    result = self._step(lng, op_accel=-0.2, op_gas=-0.2)
+    result = self._step(lng, op_accel=BRAKING, op_gas=-0.2)
     self.assertTrue(result.brake_actuate)
     self.assertAlmostEqual(result.gas, -0.2)
 
@@ -179,7 +210,7 @@ class TestLongitudinalExt(unittest.TestCase):
   def test_no_propulsion_request_while_stopping(self):
     """Below creep speed the brakes own the stop."""
     lng = self._build(follow_control=False)
-    result = self._step(lng, op_accel=-0.2, op_gas=-0.2, v_ego=_GAS_CREEP_SPEED - 0.1)
+    result = self._step(lng, op_accel=BRAKING, op_gas=-0.2, v_ego=_GAS_CREEP_SPEED - 0.1)
     self.assertTrue(result.brake_actuate)
     self.assertEqual(result.gas, CarControllerParams.INACTIVE_GAS)
 

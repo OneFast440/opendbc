@@ -69,10 +69,23 @@ _TTC_BYPASS_S = 8.0
 _HEADWAY_BYPASS_S = 0.5
 
 # Separate hysteresis for the brake and pre-charge requests.
-_BRAKE_ENGAGE = -0.14
-_BRAKE_RELEASE = -0.06
-_PRECHARGE_ENGAGE = -0.12
-_PRECHARGE_RELEASE = -0.06
+#
+# The brakes are asked for only once the propulsion channel has run out of room. Below
+# MIN_GAS that channel releases to its inactive sentinel, which is a closed throttle, and on
+# this platform a closed throttle measures -0.55 m/s^2 of overrun braking at 9-29 mph. So
+# every request shallower than MIN_GAS is deliverable without the friction brakes, and asking
+# for them there only lights the brake lamp at the car behind for deceleration the engine was
+# going to produce anyway. BluePilot engages at -0.14, which is inside that band and is what
+# made the lamp flash on and off while following.
+#
+# Release sits just shallower than where the propulsion channel resumes (_GAS_RELEASE), so
+# propulsion is already carrying the request by the time the brakes let go.
+_BRAKE_ENGAGE = -0.50
+_BRAKE_RELEASE = -0.35
+# Pre-charge leads the brakes so the calipers are up to pressure before they bite. It does not
+# light the lamp on its own: over 236 s of logs the lamp was never lit by pre-charge alone.
+_PRECHARGE_ENGAGE = -0.42
+_PRECHARGE_RELEASE = -0.30
 
 # Releasing the propulsion request to the inactive sentinel is a 4.5 m/s^2 step on the wire,
 # so the threshold that does it gets hysteresis: a command hovering at MIN_GAS would otherwise
@@ -111,7 +124,7 @@ class LongitudinalExt:
     # Brake hysteresis on the planner's own command, used whenever follow control is not driving
     brake_actuate = self.brake_actuate_last
     accel_pitch_compensated = op_accel + accel_due_to_pitch
-    if accel_pitch_compensated > _BRAKE_RELEASE or not CC.longActive:
+    if accel_pitch_compensated > _BRAKE_RELEASE or not CC.longActive or CS.out.gasPressed:
       brake_actuate = False
     elif accel_pitch_compensated < _BRAKE_ENGAGE:
       brake_actuate = True
@@ -142,6 +155,15 @@ class LongitudinalExt:
         brake_actuate = accel < _BRAKE_ENGAGE
         precharge_actuate = accel < _PRECHARGE_ENGAGE
         follow_control_used = True
+
+    # Never brake against the driver's own accelerator. Upstream never had to think about
+    # this because the accelerator disengages longitudinal control outright, but with that
+    # override held (ControlsExt.get_long_active) openpilot keeps commanding through the
+    # press, and the planner reading an overspeed must not put the brakes on under the
+    # driver's foot. Propulsion is left alone: the PCM arbitrates it against the pedal.
+    if CS.out.gasPressed:
+      brake_actuate = False
+      precharge_actuate = False
 
     self.accel_last = accel
 
