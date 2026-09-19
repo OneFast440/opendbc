@@ -15,6 +15,8 @@ decides, and this narrows what is sent to the car based on what the lead vehicle
   pacing     matched to the lead. Gas is capped, so the car holds station instead of surging.
   trailing   falling behind. Left alone.
 
+With no lead in sight none of this applies and the planner goes through untouched.
+
 Every one of those is a cap and never a floor: a deceleration the planner asked for is passed
 through untouched, whatever the lead is doing.
 
@@ -129,9 +131,11 @@ class LongitudinalExt:
       lead = CC_SP.leadOne if CC_SP.leadOne.status else None
       v_lead_mph = (lead.vLead * MS_TO_MPH) if lead else 0.0
 
+      # Every limit here is defined against a lead, so without one there is nothing to apply
+      # and the planner is passed straight through.
       use_follow = (self.speed_allowed and CC.longActive
                     and not CS.out.gasPressed and not CS.out.brakePressed
-                    and (lead is None or v_lead_mph > _MIN_LEAD_SPEED_MPH))
+                    and lead is not None and v_lead_mph > _MIN_LEAD_SPEED_MPH)
 
       if use_follow:
         accel, gas = self._follow_limits(lead, CS, op_accel, op_gas, accel_due_to_pitch)
@@ -192,34 +196,28 @@ class LongitudinalExt:
     return gas
 
   def _follow_limits(self, lead, CS, op_accel, op_gas, accel_due_to_pitch):
-    """Gas and accel bounds for the current lead state."""
+    """Gas and accel bounds for the current lead state. Only called when there is a lead."""
     v_ego = max(CS.out.vEgo, 0.5)
 
     headway_s = 999.0
     ttc_s = 120.0
     gas_max = op_gas
-    accel_min, accel_max = op_accel, op_accel
 
-    if lead is None:
-      # Nothing ahead: the planner is free on gas, but there is nothing to accelerate toward
-      # either, so hold accel at zero rather than letting it drift.
-      accel_min = accel_max = 0.0
-    else:
-      d_rel = float(lead.dRel)
-      v_rel = float(lead.vRel)
-      if d_rel > 0:
-        headway_s = float(clip(d_rel / v_ego, 0.0, 999.0))
-        ttc_s = float(clip(d_rel / -v_rel, 0.2, 120.0)) if v_rel < 0 else 60.0
+    d_rel = float(lead.dRel)
+    v_rel = float(lead.vRel)
+    if d_rel > 0:
+      headway_s = float(clip(d_rel / v_ego, 0.0, 999.0))
+      ttc_s = float(clip(d_rel / -v_rel, 0.2, 120.0)) if v_rel < 0 else 60.0
 
-      if v_rel < -_V_REL_DEADBAND:                    # gaining on the lead
-        gas_max = 0.0 if headway_s < _NO_GAS_HEADWAY_S else op_gas
-      elif v_rel > _V_REL_DEADBAND:                   # trailing
-        gas_max = op_gas
-      else:                                           # pacing
-        gas_max = _PACING_GAS_CAP + accel_due_to_pitch
+    if v_rel < -_V_REL_DEADBAND:                      # gaining on the lead
+      gas_max = 0.0 if headway_s < _NO_GAS_HEADWAY_S else op_gas
+    elif v_rel > _V_REL_DEADBAND:                     # trailing
+      gas_max = op_gas
+    else:                                             # pacing
+      gas_max = _PACING_GAS_CAP + accel_due_to_pitch
 
     gas = min(op_gas, gas_max)
-    accel = float(clip(op_accel, accel_min, accel_max))
+    accel = op_accel
 
     # Ease the first brake application in, unless closing fast or already very close.
     if ttc_s > _TTC_BYPASS_S and headway_s > _HEADWAY_BYPASS_S:

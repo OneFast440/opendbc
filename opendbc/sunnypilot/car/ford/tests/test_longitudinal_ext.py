@@ -87,13 +87,29 @@ class TestLongitudinalExt(unittest.TestCase):
     result = self._step(lng, op_accel=0.0, op_gas=1.5, lead=lead)
     self.assertAlmostEqual(result.gas, 1.5)
 
-  def test_no_lead_holds_accel_at_zero(self):
+  def test_no_lead_is_left_to_the_planner(self):
+    """Every follow limit is defined against a lead, so without one there is nothing to do."""
     lng = self._build()
     self._settle_speed(lng)
-    result = self._step(lng, op_accel=-1.0, op_gas=0.5)
-    self.assertTrue(result.follow_control_used)
-    self.assertEqual(result.accel, 0.0)
+    result = self._step(lng, op_accel=0.5, op_gas=0.5)
+    self.assertFalse(result.follow_control_used)
+    self.assertAlmostEqual(result.accel, 0.5)
     self.assertAlmostEqual(result.gas, 0.5)
+    # and a brake request is not capped either
+    result = self._step(lng, op_accel=-1.0, op_gas=-1.0)
+    self.assertAlmostEqual(result.accel, -1.0)
+
+  def test_no_lead_can_still_brake(self):
+    """Regression: the no-lead clamp pinned the brake channel at zero and kept it there,
+    which also reset the CarController's rate limiter every frame. Braking was impossible."""
+    lng = self._build()
+    self._settle_speed(lng)
+    sent = 0.0
+    for _ in range(60):
+      # what the CarController would hand us, including its 3.5 m/s^3 downward limit
+      op_accel = max(-3.0, sent - 3.5 * CarControllerParams.ACC_CONTROL_STEP * 0.01)
+      sent = self._step(lng, op_accel=op_accel, op_gas=-3.0).accel
+    self.assertAlmostEqual(sent, -3.0)
 
   def test_slow_lead_is_left_to_the_planner(self):
     lng = self._build()
