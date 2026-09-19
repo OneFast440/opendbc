@@ -203,9 +203,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     accel = float(np.clip(accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
     gas = float(np.clip(gas, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
 
-    # Both gas and accel are in m/s^2, accel is used solely for braking
-    if not CC.longActive or gas < CarControllerParams.MIN_GAS:
-      gas = CarControllerParams.INACTIVE_GAS
+    # Both gas and accel are in m/s^2, accel is used solely for braking. sunnypilot: the
+    # substitution of INACTIVE_GAS below MIN_GAS happens in the extension instead of here, so
+    # the follow limits and the brake decision see the real request rather than the sentinel.
 
     # PCM applies pitch compensation to gas/accel, but we need to compensate for the brake/pre-charge bits
     accel_due_to_pitch = 0.0

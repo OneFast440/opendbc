@@ -7,7 +7,8 @@ See the LICENSE.md file in the root directory for more details.
 import unittest
 
 from opendbc.car.ford.values import CarControllerParams
-from opendbc.sunnypilot.car.ford.longitudinal_ext import MS_TO_MPH, LongitudinalExt
+from opendbc.sunnypilot.car.ford.longitudinal_ext import (MS_TO_MPH, _GAS_CREEP_SPEED, _GAS_RELEASE,
+                                                          LongitudinalExt)
 from opendbc.sunnypilot.car.ford.tests.helpers import make_car_params, make_cc, make_cc_sp, make_cs, make_lead
 
 HIGHWAY_MS = 60.0 / MS_TO_MPH
@@ -126,11 +127,59 @@ class TestLongitudinalExt(unittest.TestCase):
     self.assertTrue(result.precharge_actuate)
     self.assertFalse(result.brake_actuate)
 
-  def test_brake_and_gas_are_mutually_exclusive(self):
+  def test_braking_never_asks_for_throttle(self):
     lng = self._build(follow_control=False)
     result = self._step(lng, op_accel=-1.0, op_gas=0.5)
     self.assertTrue(result.brake_actuate)
+    self.assertLessEqual(result.gas, 0.0)
+
+  def test_a_gentle_coast_stays_on_the_gas_channel(self):
+    """The request the planner made, not a release to full engine braking."""
+    lng = self._build(follow_control=False)
+    result = self._step(lng, op_accel=-0.2, op_gas=-0.2)
+    self.assertTrue(result.brake_actuate)
+    self.assertAlmostEqual(result.gas, -0.2)
+
+  def test_released_to_inactive_below_min_gas(self):
+    """Under MIN_GAS the channel cannot carry the request, so the brakes take it."""
+    lng = self._build(follow_control=False)
+    self._step(lng, op_accel=0.0, op_gas=0.0)
+    result = self._step(lng, op_accel=-0.6, op_gas=-0.6)
     self.assertEqual(result.gas, CarControllerParams.INACTIVE_GAS)
+
+  def test_the_inactive_release_has_hysteresis(self):
+    """A command sitting on MIN_GAS must not toggle a 4.5 m/s^2 step every frame."""
+    lng = self._build(follow_control=False)
+    self._step(lng, op_accel=0.0, op_gas=0.0)
+    self.assertEqual(self._step(lng, op_accel=-0.6, op_gas=-0.6).gas,
+                     CarControllerParams.INACTIVE_GAS)
+    # back inside the expressible range, but not yet past the release threshold
+    self.assertEqual(self._step(lng, op_accel=-0.45, op_gas=-0.45).gas,
+                     CarControllerParams.INACTIVE_GAS)
+    self.assertAlmostEqual(self._step(lng, op_accel=-0.3, op_gas=-0.3).gas, -0.3)
+    self.assertLess(_GAS_RELEASE, 0.0)
+    self.assertGreater(_GAS_RELEASE, CarControllerParams.MIN_GAS)
+
+  def test_no_propulsion_request_while_stopping(self):
+    """Below creep speed the brakes own the stop."""
+    lng = self._build(follow_control=False)
+    result = self._step(lng, op_accel=-0.2, op_gas=-0.2, v_ego=_GAS_CREEP_SPEED - 0.1)
+    self.assertTrue(result.brake_actuate)
+    self.assertEqual(result.gas, CarControllerParams.INACTIVE_GAS)
+
+  def test_inactive_when_not_long_active(self):
+    lng = self._build(follow_control=False)
+    result = self._step(lng, op_accel=0.5, op_gas=0.5, long_active=False)
+    self.assertEqual(result.gas, CarControllerParams.INACTIVE_GAS)
+
+  def test_follow_limits_never_raise_a_decel_request(self):
+    """The lead limits are caps. Pacing must not turn a brake request into coasting."""
+    lng = self._build()
+    lead = make_lead(status=True, d_rel=HIGHWAY_MS * 2.0, v_rel=0.0, v_lead=HIGHWAY_MS)
+    self._settle_speed(lng, lead=lead)
+    result = self._step(lng, op_accel=-0.3, op_gas=-0.3, lead=lead)
+    self.assertTrue(result.follow_control_used)
+    self.assertAlmostEqual(result.gas, -0.3)
 
   def test_braking_eases_in(self):
     """The first brake application is rate limited so it does not stomp."""

@@ -9,15 +9,21 @@ Ford lead-aware longitudinal control, ported from BluePilot bp-7.0.
 Layered on top of openpilot's own accel and gas, not a replacement for them: the planner still
 decides, and this narrows what is sent to the car based on what the lead vehicle is doing.
 
-  gaining    closing on the lead. Inside 1.5 s of headway, gas is cut to zero rather than being
-             trimmed, because adding any throttle while closing is what makes the following
-             brake harder a moment later.
+  gaining    closing on the lead. Inside 1.5 s of headway, gas is capped at zero, because
+             adding any throttle while closing is what makes the following brake harder a
+             moment later.
   pacing     matched to the lead. Gas is capped, so the car holds station instead of surging.
   trailing   falling behind. Left alone.
+
+Every one of those is a cap and never a floor: a deceleration the planner asked for is passed
+through untouched, whatever the lead is doing.
 
 Downward accel changes are rate limited so the first brake application eases in instead of
 stomping, except when time-to-collision says that would be the wrong call. The brake and
 pre-charge requests get separate hysteresis, so the brakes pre-charge slightly before they bite.
+
+This also owns the propulsion channel's inactive sentinel, which upstream applies in the
+CarController. See _gas_request for why it has to be decided here and why it is hysteresised.
 
 Deliberately limited to highway speeds (engages above 50 mph, drops below 45) because the lead
 classification is only meaningful at steady cruise, and to leads that are themselves moving
@@ -66,6 +72,14 @@ _BRAKE_RELEASE = -0.06
 _PRECHARGE_ENGAGE = -0.12
 _PRECHARGE_RELEASE = -0.06
 
+# Releasing the propulsion request to the inactive sentinel is a 4.5 m/s^2 step on the wire,
+# so the threshold that does it gets hysteresis: a command hovering at MIN_GAS would otherwise
+# toggle it at 50 Hz.
+_GAS_RELEASE = -0.40
+# Below this the creep compensation owns the accel request, and there is no propulsion worth
+# asking for while the brakes bring the car to a stop.
+_GAS_CREEP_SPEED = 1.0
+
 
 class LongitudinalExt:
   """Mixed into the Ford CarController. Owns every piece of follow-control state."""
@@ -78,6 +92,7 @@ class LongitudinalExt:
     self.speed_allowed = False
     self.accel_last = 0.0
     self.brake_actuate_last = False
+    self.gas_inactive_last = True
 
   def pitch_compensation(self, accel_due_to_pitch: float) -> float:
     """Pitch compensation the brake and pre-charge decisions are made against.
@@ -126,13 +141,13 @@ class LongitudinalExt:
 
     self.accel_last = accel
 
-    # The car must never be asked to brake and accelerate at once.
+    # The car must never be asked to brake and accelerate at once. A mild negative request is
+    # a throttle lift, not acceleration, so it is left alone.
     if brake_actuate:
-      gas = CarControllerParams.INACTIVE_GAS
+      gas = min(gas, 0.0)
 
     accel = float(clip(accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-    if gas != CarControllerParams.INACTIVE_GAS:
-      gas = float(clip(gas, CarControllerParams.MIN_GAS, CarControllerParams.ACCEL_MAX))
+    gas = self._gas_request(CC, CS, gas, brake_actuate)
 
     return LongitudinalResult(
       accel=accel,
@@ -144,6 +159,37 @@ class LongitudinalExt:
       accel_pred=CarControllerParams.INACTIVE_GAS,
       follow_control_used=follow_control_used,
     )
+
+  def _gas_request(self, CC, CS, gas: float, brake_actuate: bool) -> float:
+    """The propulsion request as it goes on the wire, inactive sentinel included.
+
+    AccPrpl_A_Rq can carry -5.0 (inactive: the PCM stops treating it as a request at all, so
+    the engine falls back to a closed throttle) or [-0.5, +2.0]. There is nothing in between,
+    so a request the planner puts below MIN_GAS has to be released to the sentinel and left to
+    the brake channel.
+
+    That release is a 4.5 m/s^2 step, and on an engine with as much overrun braking as a
+    Raptor R's it is felt as a snatch, so two things guard it. It is hysteresised, because a
+    planner command sitting on the limit would otherwise toggle it every frame. And it is not
+    reached on the way down until the request really is below MIN_GAS: the gentle coast region
+    is expressed through this channel rather than collapsed into full engine braking.
+
+    Deciding it here rather than in the CarController is what makes that possible. Upstream
+    substitutes the sentinel before the follow limits run, which leaves them clipping against
+    -5.0 as if it were a real request.
+    """
+    if not CC.longActive or (brake_actuate and CS.out.vEgo < _GAS_CREEP_SPEED):
+      gas = CarControllerParams.INACTIVE_GAS
+    elif self.gas_inactive_last:
+      if gas < _GAS_RELEASE:
+        gas = CarControllerParams.INACTIVE_GAS
+    elif gas < CarControllerParams.MIN_GAS:
+      gas = CarControllerParams.INACTIVE_GAS
+
+    self.gas_inactive_last = gas == CarControllerParams.INACTIVE_GAS
+    if gas != CarControllerParams.INACTIVE_GAS:
+      gas = float(clip(gas, CarControllerParams.MIN_GAS, CarControllerParams.ACCEL_MAX))
+    return gas
 
   def _follow_limits(self, lead, CS, op_accel, op_gas, accel_due_to_pitch):
     """Gas and accel bounds for the current lead state."""
@@ -172,7 +218,7 @@ class LongitudinalExt:
       else:                                           # pacing
         gas_max = _PACING_GAS_CAP + accel_due_to_pitch
 
-    gas = float(clip(op_gas, min(0.0, gas_max), max(0.0, gas_max)))
+    gas = min(op_gas, gas_max)
     accel = float(clip(op_accel, accel_min, accel_max))
 
     # Ease the first brake application in, unless closing fast or already very close.
