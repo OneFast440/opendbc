@@ -213,6 +213,7 @@ def _initialize_ford(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_d
     lateral.highSpeedDampening = _clamp_tuning(params_dict.get("FordHighSpeedDampening_ang"), HIGH_SPEED_DAMPENING_RANGE)
     lateral.laneChangeFactor = _clamp_tuning(params_dict.get("FordLaneChangeFactor_ang"), LANE_CHANGE_FACTOR_RANGE)
     lateral.satObserver = _bool_param(params_dict, "FordSatObserver_ang")
+    lateral.deliveryCompensation = _bool_param(params_dict, "FordDeliveryCompensation_ang")
     # Shared with curvature mode. Angle mode used to hard-wire this on, so the setting only ever
     # controlled curvature mode; reading it here is what makes the toggle mean what it says in
     # both. Same default, so nothing changes for anyone who has not chosen.

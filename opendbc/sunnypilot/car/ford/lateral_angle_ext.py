@@ -136,6 +136,31 @@ _SAT_OBS_RISING_EPS = 1e-4        # 1/m per call below which "still growing" is 
 _SAT_OBS_MAX_HOLD_S = 10.0        # hard release; longer than any real corner, short of a latch
 _SAT_OBS_REFRACTORY_S = 1.0       # after a hard release, before it may arm again
 _SAT_OBS_RATIO_NEUTRAL = 1.0      # what the filter holds while gated, i.e. "delivering fine"
+
+# Closed-loop correction on the shortfall the observer measures.
+#
+# path_angle = kappa * v * gain is open loop: nothing anywhere checks whether the module
+# actually produced the curvature that was asked of it. On this truck it does not. System ID
+# over four logs, hands-off segments only, lag aligned, gives delivered/commanded = 0.874
+# (R2 0.94-0.97 per log, 0.851 at gentle curvature and 0.906 at moderate). That shortfall is
+# uncorrected, so the truck runs wide and the driver adds the rest.
+#
+# delivery_ratio above is already the lag-aligned, low-passed measurement of exactly that, so
+# this scales the gain by its reciprocal.
+#
+# It only ever adds. Under-delivery is the failure mode, and cutting the command when the
+# ratio reads high would hand a measurement artifact, a cambered road or a driver nudge, the
+# authority to steer less in a curve. The cap is what a 0.80 ratio needs; anything below that
+# is a broken measurement rather than a gain to chase, and is ignored rather than extrapolated.
+#
+# Its own time constant is far slower than the ratio filter's, so the correction walks in over
+# a couple of seconds instead of tracking the ratio's own movement through a corner, and it
+# decays back to neutral slower still whenever the measurement stops being trustworthy, which
+# is every driver touch, lane change and stall blip.
+_DELIVERY_COMP_MAX = 1.25         # ceiling on the boost
+_DELIVERY_COMP_MIN_RATIO = 0.80   # below this the measurement is suspect, not a target
+_DELIVERY_COMP_TAU_S = 2.0        # rise
+_DELIVERY_COMP_DECAY_TAU_S = 4.0  # fall back to 1.0 when the measurement is gated
 _SAT_OBS_RATIO_MAX = 2.0          # clamp, so one bad frame cannot drag the filter far
 # The lag is finer than the 50 ms lateral tick, so the aligned request is interpolated between
 # the two bracketing frames rather than rounded to one of them. Rounding 31 ms to a whole frame
@@ -231,9 +256,15 @@ class LateralAngleExt:
     # Delivered-vs-commanded saturation observer. Default off: this is live steering code and the
     # thresholds below are road-validated on one truck, not derived from the firmware.
     self.sat_observer_enabled = bool(tuning.satObserver)
+    # Acting on that measurement rather than only flagging it. Separate toggle: the observer is
+    # a detector and can run on its own, this closes a loop around live steering.
+    self.delivery_comp_enabled = bool(tuning.deliveryCompensation)
+    self.delivery_comp = 1.0
+    self.delivery_measured = False
     self.kappa_req_history: deque[float] = deque(maxlen=_SAT_OBS_HIST_LEN)
     self.kappa_req_last = 0.0
     self.delivery_ratio = _SAT_OBS_RATIO_NEUTRAL
+    self.delivery_measured = False
     self.pscm_attenuating = False
     self.sat_obs_below_s = 0.0
     self.sat_obs_hold_s = 0.0
@@ -245,6 +276,7 @@ class LateralAngleExt:
     self.kappa_req_history.clear()
     self.kappa_req_last = 0.0
     self.delivery_ratio = _SAT_OBS_RATIO_NEUTRAL
+    self.delivery_measured = False
     self.pscm_attenuating = False
     self.sat_obs_below_s = 0.0
     self.sat_obs_hold_s = 0.0
@@ -263,6 +295,7 @@ class LateralAngleExt:
     if (CS.out.steeringPressed or self.human_turn_active or self.lane_change
         or self.stall_blip_active or v_ego < _SAT_OBS_MIN_SPEED):
       self._clear_saturation_observer()
+      self._update_delivery_compensation()
       return
 
     rising = abs(kappa_req) > abs(self.kappa_req_last) + _SAT_OBS_RISING_EPS
@@ -270,6 +303,7 @@ class LateralAngleExt:
 
     self.kappa_req_history.append(kappa_req)
     if len(self.kappa_req_history) < self.kappa_req_history.maxlen:
+      self._update_delivery_compensation()
       return
 
     # Delay-aligned: what the car is doing now against what was asked for one actuator lag ago.
@@ -279,7 +313,8 @@ class LateralAngleExt:
     kappa_then = newer * (1.0 - _SAT_OBS_LAG_W) + older * _SAT_OBS_LAG_W
     kappa_now = get_current_curvature(CS)
     alpha = _STEER_DT / (_SAT_OBS_TAU_S + _STEER_DT)
-    if abs(kappa_then) >= _SAT_OBS_MIN_KAPPA and kappa_then * kappa_now > 0.0:
+    self.delivery_measured = abs(kappa_then) >= _SAT_OBS_MIN_KAPPA and kappa_then * kappa_now > 0.0
+    if self.delivery_measured:
       ratio = float(clip(kappa_now / kappa_then, 0.0, _SAT_OBS_RATIO_MAX))
       self.delivery_ratio += alpha * (ratio - self.delivery_ratio)
     else:
@@ -308,6 +343,26 @@ class LateralAngleExt:
     elif self.sat_obs_below_s >= _SAT_OBS_DEBOUNCE_S and self.sat_obs_refractory_s <= 0.0:
       self.pscm_attenuating = True
       self.sat_obs_hold_s = 0.0
+
+    self._update_delivery_compensation()
+
+  def _update_delivery_compensation(self) -> None:
+    """Walk the gain correction toward whatever cancels the measured shortfall.
+
+    Called from every exit of the observer, including the gated ones, so the correction always
+    moves: toward the reciprocal of the ratio while the measurement is live, and back toward
+    neutral whenever it is not. Raising the gain raises path_angle only. shadow_curvature, which
+    is what the panda deviation-checks, is kappa_cmd and is not touched, so a bigger correction
+    moves the measured curvature toward the shadow rather than away from it.
+    """
+    if self.delivery_measured and self.delivery_ratio >= _DELIVERY_COMP_MIN_RATIO:
+      target = float(clip(1.0 / self.delivery_ratio, 1.0, _DELIVERY_COMP_MAX))
+      tau = _DELIVERY_COMP_TAU_S
+    else:
+      target = 1.0
+      tau = _DELIVERY_COMP_DECAY_TAU_S
+    alpha = _STEER_DT / (tau + _STEER_DT)
+    self.delivery_comp += alpha * (target - self.delivery_comp)
 
   def _reset(self, CS, actuators=None) -> FordLateralResult:
     """Zero the command and publish a truthful shadow. Used by the inactive, human-turn and
@@ -455,6 +510,10 @@ class LateralAngleExt:
                               self.path_angle_gain_high_curv * self.high_speed_factor]))
     # Bigger curves need a little more signal to avoid understeer.
     gain = float(interp(abs(kappa_cmd), _GAIN_CURV_BP, [low_gain, high_gain]))
+    # Cancel the measured delivery shortfall. Computed at the end of the previous frame, so it
+    # is one 20 Hz tick old, which against a 2 s time constant does not matter.
+    if self.delivery_comp_enabled:
+      gain *= self.delivery_comp
     path_angle = kappa_cmd * v_ego * gain
 
     # *** saturation handling ***
