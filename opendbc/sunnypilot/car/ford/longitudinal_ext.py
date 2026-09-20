@@ -68,6 +68,17 @@ _FOLLOW_ACCEL_ROC = 0.002
 # not: let the planner's braking through immediately.
 _TTC_BYPASS_S = 8.0
 _HEADWAY_BYPASS_S = 0.5
+# And nor is it safe once the planner is asking for materially more than the ramp is delivering,
+# however comfortable the lead looks.
+#
+# Those two bypasses key off the lead alone, so a brake request the lead did not cause, a speed
+# limit, a curve, traffic further ahead, crawls out at _FOLLOW_ACCEL_ROC. Worse, the ramp and the
+# CarController's own limiter feed each other: that limiter works from the value sent last frame,
+# which is the eased one, so neither can get ahead of the other. Logged at 49 mph behind a lead
+# 38 m away and closing at 2.4 m/s: the planner asked for -0.65 and the wire carried -0.04, and
+# three seconds later it was asking -1.28 against -0.28. Follow control then dropped out, both
+# limiters went with it, and the whole request landed in 400 ms at -2.05 m/s^2.
+_FOLLOW_EASE_BYPASS = 0.20        # m/s^2 of shortfall before the ease-in gets out of the way
 
 # Separate hysteresis for the brake and pre-charge requests.
 #
@@ -257,8 +268,13 @@ class LongitudinalExt:
     gas = min(op_gas, gas_max)
     accel = op_accel
 
-    # Ease the first brake application in, unless closing fast or already very close.
-    if ttc_s > _TTC_BYPASS_S and headway_s > _HEADWAY_BYPASS_S:
+    # Ease the first brake application in, unless closing fast, already very close, or the
+    # planner is asking for materially more than the ramp can hand over. op_gas is the planner's
+    # own request before the creep compensation and the CarController's rate limit, which is why
+    # the comparison is made against it rather than against op_accel: op_accel is already held
+    # within one frame of the eased value and can never show the shortfall.
+    behind = op_gas < self.accel_last - _FOLLOW_EASE_BYPASS
+    if ttc_s > _TTC_BYPASS_S and headway_s > _HEADWAY_BYPASS_S and not behind:
       accel = max(accel, self.accel_last - _FOLLOW_ACCEL_ROC)
 
     return accel, gas

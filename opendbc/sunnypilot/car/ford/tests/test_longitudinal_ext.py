@@ -259,6 +259,27 @@ class TestLongitudinalExt(unittest.TestCase):
     result = self._step(lng, op_accel=-2.0, op_gas=0.0, lead=lead)
     self.assertGreater(result.accel, -0.1)
 
+  def test_a_request_the_ramp_cannot_keep_up_with_is_not_eased_in(self):
+    """The ease-in keys off the lead, so a brake request the lead did not cause used to crawl
+    out at 0.1 m/s^3 behind a comfortable lead. Logged at 49 mph with the lead 38 m away and
+    closing at 2.4 m/s: the planner asked -0.65 and the wire carried -0.04."""
+    lng = self._build()
+    lead = make_lead(status=True, d_rel=38.0, v_rel=-2.4, v_lead=HIGHWAY_MS)
+    self._settle_speed(lng, lead=lead)
+    lng.accel_last = -0.04
+    result = self._step(lng, op_accel=-0.15, op_gas=-0.65, lead=lead)
+    self.assertTrue(result.follow_control_used)
+    self.assertLess(result.accel, -0.10)
+
+  def test_a_lead_being_tracked_comfortably_is_still_eased_in(self):
+    lng = self._build()
+    lead = make_lead(status=True, d_rel=38.0, v_rel=-2.4, v_lead=HIGHWAY_MS)
+    self._settle_speed(lng, lead=lead)
+    lng.accel_last = -0.04
+    result = self._step(lng, op_accel=-0.15, op_gas=-0.15, lead=lead)
+    self.assertTrue(result.follow_control_used)
+    self.assertAlmostEqual(result.accel, -0.042)
+
   def test_imminent_collision_is_not_eased_in(self):
     lng = self._build()
     lead = make_lead(status=True, d_rel=5.0, v_rel=-10.0, v_lead=HIGHWAY_MS)
