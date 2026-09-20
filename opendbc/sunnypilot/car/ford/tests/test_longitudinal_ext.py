@@ -129,10 +129,33 @@ class TestLongitudinalExt(unittest.TestCase):
     lng = self._build()
     lead = make_lead(status=True, d_rel=HIGHWAY_MS, v_rel=-3.0, v_lead=HIGHWAY_MS)
     self._settle_speed(lng, lead=lead)
-    for kwargs in ({'gas_pressed': True}, {'brake_pressed': True}):
-      result = self._step(lng, op_accel=0.0, op_gas=0.5, lead=lead, **kwargs)
-      self.assertFalse(result.follow_control_used, kwargs)
-      self.assertAlmostEqual(result.gas, 0.5)
+    result = self._step(lng, op_accel=0.0, op_gas=0.5, lead=lead, brake_pressed=True)
+    self.assertFalse(result.follow_control_used)
+    self.assertAlmostEqual(result.gas, 0.5)
+    result = self._step(lng, op_accel=0.0, op_gas=0.5, lead=lead, gas_pressed=True)
+    self.assertFalse(result.follow_control_used)
+
+  def test_the_accdata_goes_inactive_under_the_drivers_foot(self):
+    """The PCM refuses an active AccPrpl_A_Rq while it has cruise in its own override state:
+    CmbbDeny_B_ActlPrpl goes to 1 and CcStat_D_Actl to 2, which reads back as accFaulted.
+    Seen twice in one drive, with a positive request and with a negative one, so the whole
+    message goes back to its inactive form rather than the request being trimmed."""
+    lng = self._build(follow_control=False)
+    active = self._step(lng, op_accel=0.3, op_gas=0.3)
+    self.assertTrue(active.acc_enabled)
+    self.assertAlmostEqual(active.gas, 0.3)
+
+    for op_gas in (0.5, 0.0, -0.3):
+      result = self._step(lng, op_accel=op_gas, op_gas=op_gas, gas_pressed=True)
+      self.assertFalse(result.acc_enabled, op_gas)
+      self.assertEqual(result.gas, CarControllerParams.INACTIVE_GAS, op_gas)
+      self.assertFalse(result.brake_actuate, op_gas)
+      self.assertFalse(result.precharge_actuate, op_gas)
+
+  def test_acc_enabled_tracks_long_active_otherwise(self):
+    lng = self._build(follow_control=False)
+    self.assertTrue(self._step(lng, op_accel=0.0, op_gas=0.0).acc_enabled)
+    self.assertFalse(self._step(lng, op_accel=0.0, op_gas=0.0, long_active=False).acc_enabled)
 
   def test_brake_hysteresis(self):
     lng = self._build(follow_control=False)

@@ -221,6 +221,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     stopping = actuators.longControlState == LongCtrlState.stopping
     # TODO: look into using the actuators packet to send the desired speed
-    return fordcan.create_acc_msg(self.packer, self.CAN, CC.longActive, lng.gas, lng.accel, stopping,
+    # sunnypilot: not CC.longActive. The extension clears it while the driver is on the
+    # accelerator, because the PCM denies an active request during its own override state.
+    return fordcan.create_acc_msg(self.packer, self.CAN, lng.acc_enabled, lng.gas, lng.accel, stopping,
                                   lng.brake_actuate, v_ego_kph=V_CRUISE_MAX,
                                   precharge_request=lng.precharge_actuate, accel_pred=lng.accel_pred)

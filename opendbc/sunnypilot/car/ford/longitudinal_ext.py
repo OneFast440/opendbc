@@ -38,6 +38,7 @@ from numpy import clip
 from opendbc.car.ford.values import CarControllerParams
 
 LongitudinalResult = namedtuple('LongitudinalResult', [
+  'acc_enabled',
   'accel',
   'gas',
   'brake_actuate',
@@ -156,11 +157,20 @@ class LongitudinalExt:
         precharge_actuate = accel < _PRECHARGE_ENGAGE
         follow_control_used = True
 
-    # Never brake against the driver's own accelerator. Upstream never had to think about
-    # this because the accelerator disengages longitudinal control outright, but with that
-    # override held (ControlsExt.get_long_active) openpilot keeps commanding through the
-    # press, and the planner reading an overspeed must not put the brakes on under the
-    # driver's foot. Propulsion is left alone: the PCM arbitrates it against the pedal.
+    # While the driver is on the accelerator this puts the whole ACCDATA back to its inactive
+    # form, which is what the bus saw before the override could be held at all.
+    #
+    # The first version of that hold kept commanding propulsion through the press, on the
+    # assumption that the PCM arbitrates it against the pedal. It does not. Engaging with the
+    # pedal down puts CcStat_D_Actl into 5, override, and an active AccPrpl_A_Rq in that state
+    # is refused: CmbbDeny_B_ActlPrpl goes to 1, CcStat_D_Actl to 2, and openpilot reads that
+    # as accFaulted. Seen twice in one drive, 280 ms after engaging, once with a positive
+    # request and once with a negative one, so it is the presence of a request and not its
+    # magnitude or sign.
+    #
+    # What the hold is still worth is upstream of the wire: longitudinal control stays engaged,
+    # so the long control state machine does not fall to off and reset its PID, and lifting off
+    # resumes from what openpilot was already asking for instead of from zero.
     if CS.out.gasPressed:
       brake_actuate = False
       precharge_actuate = False
@@ -176,6 +186,9 @@ class LongitudinalExt:
     gas = self._gas_request(CC, CS, gas, brake_actuate)
 
     return LongitudinalResult(
+      # Cmbb_B_Enbl and AccResumEnbl_B_Rq. Cleared while the driver is on the accelerator, so
+      # the message is exactly the inactive one the bus saw before the hold existed.
+      acc_enabled=bool(CC.longActive) and not CS.out.gasPressed,
       accel=accel,
       gas=gas,
       brake_actuate=brake_actuate,
@@ -203,8 +216,11 @@ class LongitudinalExt:
     Deciding it here rather than in the CarController is what makes that possible. Upstream
     substitutes the sentinel before the follow limits run, which leaves them clipping against
     -5.0 as if it were a real request.
+
+    It is also the sentinel whenever the driver is on the accelerator: the PCM refuses an
+    active request in that state. See update().
     """
-    if not CC.longActive or (brake_actuate and CS.out.vEgo < _GAS_CREEP_SPEED):
+    if not CC.longActive or CS.out.gasPressed or (brake_actuate and CS.out.vEgo < _GAS_CREEP_SPEED):
       gas = CarControllerParams.INACTIVE_GAS
     elif self.gas_inactive_last:
       if gas < _GAS_RELEASE:
