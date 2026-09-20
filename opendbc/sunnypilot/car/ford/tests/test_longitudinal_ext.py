@@ -145,12 +145,23 @@ class TestLongitudinalExt(unittest.TestCase):
     self.assertTrue(active.acc_enabled)
     self.assertAlmostEqual(active.gas, 0.3)
 
-    for op_gas in (0.5, 0.0, -0.3):
+    for op_gas in (0.5, 0.0, -0.3, -2.0):
       result = self._step(lng, op_accel=op_gas, op_gas=op_gas, gas_pressed=True)
       self.assertFalse(result.acc_enabled, op_gas)
       self.assertEqual(result.gas, CarControllerParams.INACTIVE_GAS, op_gas)
       self.assertFalse(result.brake_actuate, op_gas)
       self.assertFalse(result.precharge_actuate, op_gas)
+      # AccBrkTot_A_Rq has to go inactive with the enable bit. Clearing the bit alone still
+      # faulted: the module denied a live brake total under a cleared Cmbb_B_Enbl.
+      self.assertEqual(result.accel, 0.0, op_gas)
+
+  def test_an_inactive_message_carries_no_request_at_all(self):
+    lng = self._build(follow_control=False)
+    for kwargs in ({'long_active': False}, {'gas_pressed': True}):
+      result = self._step(lng, op_accel=-2.0, op_gas=-2.0, **kwargs)
+      self.assertFalse(result.acc_enabled, kwargs)
+      self.assertEqual(result.accel, 0.0, kwargs)
+      self.assertEqual(result.gas, CarControllerParams.INACTIVE_GAS, kwargs)
 
   def test_acc_enabled_tracks_long_active_otherwise(self):
     lng = self._build(follow_control=False)

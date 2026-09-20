@@ -188,6 +188,10 @@ class LongitudinalExt:
 
     self.accel_last = accel
 
+    # Cmbb_B_Enbl and AccResumEnbl_B_Rq. Cleared while the driver is on the accelerator, so the
+    # whole message goes back to the inactive one the bus saw before the hold existed.
+    acc_enabled = bool(CC.longActive) and not CS.out.gasPressed
+
     # The car must never be asked to brake and accelerate at once. A mild negative request is
     # a throttle lift, not acceleration, so it is left alone.
     if brake_actuate:
@@ -196,10 +200,18 @@ class LongitudinalExt:
     accel = float(clip(accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
     gas = self._gas_request(CC, CS, gas, brake_actuate)
 
+    # Clearing the enable bit is not enough on its own: AccBrkTot_A_Rq has to go with it.
+    # Holding the accelerator override keeps the planner running, so a live brake total kept
+    # reaching the wire under a cleared Cmbb_B_Enbl, and the module refuses that combination
+    # the same way it refuses an active propulsion request. Both logged faults show it: enable
+    # clear, AccPrpl at its sentinel, AccBrkTot still carrying +0.24 and +0.34, and
+    # CmbbDeny_B_ActlPrpl going up 250 ms later. Zeroing it makes the message the same
+    # inactive one the bus saw before any of this existed.
+    if not acc_enabled:
+      accel = 0.0
+
     return LongitudinalResult(
-      # Cmbb_B_Enbl and AccResumEnbl_B_Rq. Cleared while the driver is on the accelerator, so
-      # the message is exactly the inactive one the bus saw before the hold existed.
-      acc_enabled=bool(CC.longActive) and not CS.out.gasPressed,
+      acc_enabled=acc_enabled,
       accel=accel,
       gas=gas,
       brake_actuate=brake_actuate,
