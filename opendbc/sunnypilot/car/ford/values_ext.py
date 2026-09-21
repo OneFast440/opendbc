@@ -175,6 +175,25 @@ PSCM_LIM_STAT_UNRELIABLE_CANFD = True
 # User-tunable values. (default, min, max) -- the single source of truth for the defaults and
 # clamps used by the settings UI, the sunnylink schema, and the control code.
 # angle mode
+# Accelerator pedal position, percent, above which the driver counts as overriding.
+#
+# CarState sets gasPressed from ApedPos_Pc_ActlArb > 1e-6, so the lightest imaginable touch
+# reads as a full override and the whole ACCDATA goes inactive. If the driver is asking for
+# less than cruise already was, the truck then slows down under a pedal they just put their
+# foot on, which is the opposite of what touching the accelerator is for.
+#
+# Measured over six of the owner's drives, a deliberate press sits at 7-31% with a 16% median
+# and only 0.1% of pressed frames below 2%, so a threshold in this range costs nothing on a
+# real press and only filters the feather.
+#
+# It is a tuning value rather than a constant because how far it can be raised is a question
+# about the PCM, not about the pedal. Staying active at a percent or two of pedal is the same
+# thing as the normal cruising state. Staying active at ten is openpilot commanding propulsion
+# while the driver is also asking for some, which is the arrangement that was denied when
+# engaging with the pedal already down. Whether it is also denied once already engaged is
+# untested, and raising this is how to find out.
+PEDAL_OVERRIDE_RANGE = (2.0, 0.0, 25.0)   # default, min, max
+
 LOW_SPEED_FACTOR_RANGE = (1.0, 0.5, 1.5)
 HIGH_SPEED_FACTOR_RANGE = (1.0, 0.5, 1.5)
 HIGH_SPEED_DAMPENING_RANGE = (1.0, 0.25, 1.25)

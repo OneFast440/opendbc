@@ -36,6 +36,7 @@ from collections import namedtuple
 from numpy import clip
 
 from opendbc.car.ford.values import CarControllerParams
+from opendbc.sunnypilot.car.ford.values_ext import PEDAL_OVERRIDE_RANGE
 
 LongitudinalResult = namedtuple('LongitudinalResult', [
   'acc_enabled',
@@ -107,6 +108,18 @@ _GAS_RELEASE = -0.40
 # asking for while the brakes bring the car to a stop.
 _GAS_CREEP_SPEED = 1.0
 
+# How a feathered pedal is told from a real press, and why the threshold is tunable rather
+# than fixed, is documented on PEDAL_OVERRIDE_RANGE in values_ext.
+
+
+def _tuned_pedal(value: float) -> float:
+  """Clamp the stored threshold into range. A param that has never been written reads 0.0,
+  which would mean every touch counts, so an unset one falls back to the default."""
+  default, lo, hi = PEDAL_OVERRIDE_RANGE
+  if value <= 0.0:
+    return default
+  return float(clip(value, lo, hi))
+
 
 class LongitudinalExt:
   """Mixed into the Ford CarController. Owns every piece of follow-control state."""
@@ -115,6 +128,7 @@ class LongitudinalExt:
     tuning = CP_SP.fordLongitudinalTuning
     self.follow_control = bool(tuning.followControl)
     self.downhill_compensation = bool(tuning.downhillCompensation)
+    self.pedal_override_pc = _tuned_pedal(tuning.pedalOverrideThreshold)
 
     self.speed_allowed = False
     self.accel_last = 0.0
@@ -131,12 +145,25 @@ class LongitudinalExt:
       return 0.0
     return accel_due_to_pitch
 
+  def _driver_overriding(self, CS) -> bool:
+    """Whether the accelerator counts as a driver override.
+
+    Against the pedal position where the CarState has it, so a feathered pedal does not take
+    the whole ACCDATA inactive and cost the driver speed. gasPressed is the fallback for a
+    CarState that does not carry the position.
+    """
+    pedal = getattr(CS, "accelerator_pedal_pc", None)
+    if pedal is None:
+      return bool(CS.out.gasPressed)
+    return bool(CS.out.gasPressed) and pedal > self.pedal_override_pc
+
   def update(self, CC, CC_SP, CS, op_accel, op_gas, accel_due_to_pitch) -> LongitudinalResult:
     """Narrow openpilot's accel and gas based on the lead, for one 50 Hz frame."""
+    overriding = self._driver_overriding(CS)
     # Brake hysteresis on the planner's own command, used whenever follow control is not driving
     brake_actuate = self.brake_actuate_last
     accel_pitch_compensated = op_accel + accel_due_to_pitch
-    if accel_pitch_compensated > _BRAKE_RELEASE or not CC.longActive or CS.out.gasPressed:
+    if accel_pitch_compensated > _BRAKE_RELEASE or not CC.longActive or overriding:
       brake_actuate = False
     elif accel_pitch_compensated < _BRAKE_ENGAGE:
       brake_actuate = True
@@ -159,7 +186,7 @@ class LongitudinalExt:
       # Every limit here is defined against a lead, so without one there is nothing to apply
       # and the planner is passed straight through.
       use_follow = (self.speed_allowed and CC.longActive
-                    and not CS.out.gasPressed and not CS.out.brakePressed
+                    and not overriding and not CS.out.brakePressed
                     and lead is not None and v_lead_mph > _MIN_LEAD_SPEED_MPH)
 
       if use_follow:
@@ -182,7 +209,7 @@ class LongitudinalExt:
     # What the hold is still worth is upstream of the wire: longitudinal control stays engaged,
     # so the long control state machine does not fall to off and reset its PID, and lifting off
     # resumes from what openpilot was already asking for instead of from zero.
-    if CS.out.gasPressed:
+    if overriding:
       brake_actuate = False
       precharge_actuate = False
 
@@ -190,7 +217,7 @@ class LongitudinalExt:
 
     # Cmbb_B_Enbl and AccResumEnbl_B_Rq. Cleared while the driver is on the accelerator, so the
     # whole message goes back to the inactive one the bus saw before the hold existed.
-    acc_enabled = bool(CC.longActive) and not CS.out.gasPressed
+    acc_enabled = bool(CC.longActive) and not overriding
 
     # The car must never be asked to brake and accelerate at once. A mild negative request is
     # a throttle lift, not acceleration, so it is left alone.
@@ -198,7 +225,7 @@ class LongitudinalExt:
       gas = min(gas, 0.0)
 
     accel = float(clip(accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-    gas = self._gas_request(CC, CS, gas, brake_actuate)
+    gas = self._gas_request(CC, CS, gas, brake_actuate, overriding)
 
     # Clearing the enable bit is not enough on its own: AccBrkTot_A_Rq has to go with it.
     # Holding the accelerator override keeps the planner running, so a live brake total kept
@@ -222,7 +249,7 @@ class LongitudinalExt:
       follow_control_used=follow_control_used,
     )
 
-  def _gas_request(self, CC, CS, gas: float, brake_actuate: bool) -> float:
+  def _gas_request(self, CC, CS, gas: float, brake_actuate: bool, overriding: bool) -> float:
     """The propulsion request as it goes on the wire, inactive sentinel included.
 
     AccPrpl_A_Rq can carry -5.0 (inactive: the PCM stops treating it as a request at all, so
@@ -243,7 +270,7 @@ class LongitudinalExt:
     It is also the sentinel whenever the driver is on the accelerator: the PCM refuses an
     active request in that state. See update().
     """
-    if not CC.longActive or CS.out.gasPressed or (brake_actuate and CS.out.vEgo < _GAS_CREEP_SPEED):
+    if not CC.longActive or overriding or (brake_actuate and CS.out.vEgo < _GAS_CREEP_SPEED):
       gas = CarControllerParams.INACTIVE_GAS
     elif self.gas_inactive_last:
       if gas < _GAS_RELEASE:

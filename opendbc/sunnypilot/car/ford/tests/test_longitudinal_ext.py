@@ -155,6 +155,41 @@ class TestLongitudinalExt(unittest.TestCase):
       # faulted: the module denied a live brake total under a cleared Cmbb_B_Enbl.
       self.assertEqual(result.accel, 0.0, op_gas)
 
+  def test_a_feathered_pedal_is_not_an_override(self):
+    """CarState calls any non-zero pedal an override, so the lightest touch used to take the
+    whole ACCDATA inactive and the truck lost speed under a pedal just been rested on."""
+    lng = self._build(follow_control=False, pedal_override_threshold=2.0)
+    result = lng.update(make_cc(long_active=True), make_cc_sp(),
+                        make_cs(v_ego=HIGHWAY_MS, gas_pressed=True, pedal_pc=1.0), 0.3, 0.3, 0.0)
+    self.assertTrue(result.acc_enabled)
+    self.assertAlmostEqual(result.gas, 0.3)
+
+  def test_a_real_press_is_still_an_override(self):
+    lng = self._build(follow_control=False, pedal_override_threshold=2.0)
+    result = lng.update(make_cc(long_active=True), make_cc_sp(),
+                        make_cs(v_ego=HIGHWAY_MS, gas_pressed=True, pedal_pc=12.0), 0.3, 0.3, 0.0)
+    self.assertFalse(result.acc_enabled)
+    self.assertEqual(result.gas, CarControllerParams.INACTIVE_GAS)
+    self.assertEqual(result.accel, 0.0)
+
+  def test_the_threshold_is_tunable(self):
+    for threshold, pedal, overriding in ((2.0, 5.0, True), (10.0, 5.0, False), (10.0, 12.0, True)):
+      lng = self._build(follow_control=False, pedal_override_threshold=threshold)
+      result = lng.update(make_cc(long_active=True), make_cc_sp(),
+                          make_cs(v_ego=HIGHWAY_MS, gas_pressed=True, pedal_pc=pedal), 0.3, 0.3, 0.0)
+      self.assertEqual(result.acc_enabled, not overriding, (threshold, pedal))
+
+  def test_a_carstate_without_a_pedal_position_falls_back_to_gas_pressed(self):
+    lng = self._build(follow_control=False)
+    cs = make_cs(v_ego=HIGHWAY_MS, gas_pressed=True, pedal_pc=0.0)
+    del cs.accelerator_pedal_pc
+    self.assertFalse(lng.update(make_cc(long_active=True), make_cc_sp(), cs, 0.3, 0.3, 0.0).acc_enabled)
+
+  def test_an_unset_threshold_param_does_not_mean_every_touch(self):
+    """A float param that has never been written reads 0.0, which would override on contact."""
+    lng = self._build(follow_control=False, pedal_override_threshold=0.0)
+    self.assertGreater(lng.pedal_override_pc, 0.0)
+
   def test_an_inactive_message_carries_no_request_at_all(self):
     lng = self._build(follow_control=False)
     for kwargs in ({'long_active': False}, {'gas_pressed': True}):
