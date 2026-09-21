@@ -9,7 +9,8 @@ import unittest
 from opendbc.car.ford.values import CarControllerParams
 from opendbc.sunnypilot.car.ford.longitudinal_ext import (MS_TO_MPH, _BRAKE_ENGAGE, _BRAKE_RELEASE,
                                                           _GAS_CREEP_SPEED, _GAS_RELEASE,
-                                                          _PRECHARGE_ENGAGE, LongitudinalExt)
+                                                          _PRECHARGE_ENGAGE, _RECOVER_DECEL_CAP,
+                                                          _RECOVER_MAX_S, LongitudinalExt)
 from opendbc.sunnypilot.car.ford.tests.helpers import make_car_params, make_cc, make_cc_sp, make_cs, make_lead
 
 HIGHWAY_MS = 60.0 / MS_TO_MPH
@@ -32,6 +33,14 @@ class TestLongitudinalExt(unittest.TestCase):
     return lng.update(make_cc(long_active=long_active), make_cc_sp(lead=lead),
                       make_cs(v_ego=v_ego, gas_pressed=gas_pressed, brake_pressed=brake_pressed),
                       op_accel, op_gas, pitch)
+
+  @staticmethod
+  def _press(lng, pedal_pc, op_gas, v_ego=HIGHWAY_MS, set_speed=0.0, lead=None):
+    """One frame with the driver on the pedal at a given position."""
+    return lng.update(make_cc(long_active=True), make_cc_sp(lead=lead),
+                      make_cs(v_ego=v_ego, gas_pressed=pedal_pc > 0.0, pedal_pc=pedal_pc,
+                              set_speed=set_speed),
+                      op_gas, op_gas, 0.0)
 
   def _settle_speed(self, lng, v_ego=HIGHWAY_MS, lead=None):
     """Cross the engage threshold so the speed band latches on."""
@@ -132,7 +141,8 @@ class TestLongitudinalExt(unittest.TestCase):
     result = self._step(lng, op_accel=0.0, op_gas=0.5, lead=lead, brake_pressed=True)
     self.assertFalse(result.follow_control_used)
     self.assertAlmostEqual(result.gas, 0.5)
-    result = self._step(lng, op_accel=0.0, op_gas=0.5, lead=lead, gas_pressed=True)
+    result = lng.update(make_cc(long_active=True), make_cc_sp(lead=lead),
+                        make_cs(v_ego=HIGHWAY_MS, gas_pressed=True, pedal_pc=35.0), 0.0, 0.5, 0.0)
     self.assertFalse(result.follow_control_used)
 
   def test_the_accdata_goes_inactive_under_the_drivers_foot(self):
@@ -146,7 +156,7 @@ class TestLongitudinalExt(unittest.TestCase):
     self.assertAlmostEqual(active.gas, 0.3)
 
     for op_gas in (0.5, 0.0, -0.3, -2.0):
-      result = self._step(lng, op_accel=op_gas, op_gas=op_gas, gas_pressed=True)
+      result = self._press(lng, pedal_pc=35.0, op_gas=op_gas)
       self.assertFalse(result.acc_enabled, op_gas)
       self.assertEqual(result.gas, CarControllerParams.INACTIVE_GAS, op_gas)
       self.assertFalse(result.brake_actuate, op_gas)
@@ -164,20 +174,50 @@ class TestLongitudinalExt(unittest.TestCase):
     self.assertTrue(result.acc_enabled)
     self.assertAlmostEqual(result.gas, 0.3)
 
-  def test_a_real_press_is_still_an_override(self):
+  def test_a_press_asking_for_more_than_openpilot_takes_over(self):
     lng = self._build(follow_control=False, pedal_override_threshold=2.0)
-    result = lng.update(make_cc(long_active=True), make_cc_sp(),
-                        make_cs(v_ego=HIGHWAY_MS, gas_pressed=True, pedal_pc=12.0), 0.3, 0.3, 0.0)
+    result = self._press(lng, pedal_pc=30.0, op_gas=0.3)
+    self.assertTrue(result.overriding)
     self.assertFalse(result.acc_enabled)
     self.assertEqual(result.gas, CarControllerParams.INACTIVE_GAS)
     self.assertEqual(result.accel, 0.0)
 
-  def test_the_threshold_is_tunable(self):
-    for threshold, pedal, overriding in ((2.0, 5.0, True), (10.0, 5.0, False), (10.0, 12.0, True)):
+  def test_a_press_asking_for_less_than_openpilot_does_not(self):
+    """Resting on the pedal under what cruise was already doing must not cost the driver
+    speed, which is what handing over on any pedal movement did."""
+    lng = self._build(follow_control=False, pedal_override_threshold=2.0)
+    result = self._press(lng, pedal_pc=8.0, op_gas=0.5)
+    self.assertFalse(result.overriding)
+    self.assertTrue(result.acc_enabled)
+    self.assertAlmostEqual(result.gas, 0.5)
+
+  def test_the_crossing_moves_with_openpilots_own_request(self):
+    """The same pedal is an override against a small request and not against a large one."""
+    for op_gas, overriding in ((-0.2, True), (2.0, False)):
+      lng = self._build(follow_control=False, pedal_override_threshold=2.0)
+      self.assertEqual(self._press(lng, pedal_pc=13.0, op_gas=op_gas).overriding, overriding, op_gas)
+
+  def test_the_handover_does_not_chatter(self):
+    lng = self._build(follow_control=False, pedal_override_threshold=2.0)
+    self.assertTrue(self._press(lng, pedal_pc=30.0, op_gas=0.3).overriding)
+    # back to where it would not have taken over from scratch, but not far enough to give back
+    at_edge = lng.driver_accel_request(30.0, HIGHWAY_MS)
+    self.assertTrue(self._press(lng, pedal_pc=30.0, op_gas=at_edge - 0.05).overriding)
+    self.assertFalse(self._press(lng, pedal_pc=30.0, op_gas=at_edge + 0.5).overriding)
+
+  def test_the_noise_threshold_still_applies_and_is_tunable(self):
+    for threshold, pedal, counts in ((2.0, 1.0, False), (10.0, 5.0, False), (2.0, 30.0, True)):
       lng = self._build(follow_control=False, pedal_override_threshold=threshold)
-      result = lng.update(make_cc(long_active=True), make_cc_sp(),
-                          make_cs(v_ego=HIGHWAY_MS, gas_pressed=True, pedal_pc=pedal), 0.3, 0.3, 0.0)
-      self.assertEqual(result.acc_enabled, not overriding, (threshold, pedal))
+      self.assertEqual(self._press(lng, pedal_pc=pedal, op_gas=-0.4).overriding, counts,
+                       (threshold, pedal))
+
+  def test_the_pedal_map_is_monotonic_and_falls_with_speed(self):
+    lng = self._build(follow_control=False)
+    for v in (8.0, 16.0, 25.0):
+      asked = [lng.driver_accel_request(p, v) for p in (0.0, 5.0, 11.0, 20.0, 35.0)]
+      self.assertEqual(asked, sorted(asked), v)
+    # the same pedal buys less acceleration the faster you are already going
+    self.assertGreater(lng.driver_accel_request(20.0, 8.0), lng.driver_accel_request(20.0, 25.0))
 
   def test_a_carstate_without_a_pedal_position_falls_back_to_gas_pressed(self):
     lng = self._build(follow_control=False)
@@ -189,6 +229,69 @@ class TestLongitudinalExt(unittest.TestCase):
     """A float param that has never been written reads 0.0, which would override on contact."""
     lng = self._build(follow_control=False, pedal_override_threshold=0.0)
     self.assertGreater(lng.pedal_override_pc, 0.0)
+
+  def test_overspeed_recovery_coasts_back_with_nothing_ahead(self):
+    """Released above the set speed with a clear road, the overspeed comes off on a closed
+    throttle rather than the brakes."""
+    lng = self._build(follow_control=False)
+    set_speed = HIGHWAY_MS
+    over = set_speed + 4.5                      # about 10 mph past it
+    self._press(lng, pedal_pc=35.0, op_gas=0.3, v_ego=over, set_speed=set_speed)
+    self.assertTrue(lng.overriding_last)
+    # foot off, planner wants the overspeed gone in a hurry
+    result = self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=over, set_speed=set_speed)
+    self.assertTrue(result.recovering)
+    self.assertGreaterEqual(result.accel, _RECOVER_DECEL_CAP)
+    self.assertFalse(result.brake_actuate)
+
+  def test_overspeed_recovery_ends_at_the_set_speed(self):
+    lng = self._build(follow_control=False)
+    set_speed = HIGHWAY_MS
+    self._press(lng, pedal_pc=35.0, op_gas=0.3, v_ego=set_speed + 4.5, set_speed=set_speed)
+    self.assertTrue(self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=set_speed + 4.5,
+                                set_speed=set_speed).recovering)
+    result = self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=set_speed, set_speed=set_speed)
+    self.assertFalse(result.recovering)
+    self.assertLess(result.accel, _RECOVER_DECEL_CAP)      # full braking authority is back
+
+  def test_a_lead_hands_straight_back_to_normal_operation(self):
+    lng = self._build(follow_control=False)
+    set_speed = HIGHWAY_MS
+    lead = make_lead(status=True, d_rel=30.0, v_rel=-3.0, v_lead=HIGHWAY_MS)
+    self._press(lng, pedal_pc=35.0, op_gas=0.3, v_ego=set_speed + 4.5, set_speed=set_speed)
+    result = self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=set_speed + 4.5,
+                         set_speed=set_speed, lead=lead)
+    self.assertFalse(result.recovering)
+    self.assertLess(result.accel, _RECOVER_DECEL_CAP)
+
+  def test_a_lead_appearing_mid_recovery_releases_the_cap(self):
+    lng = self._build(follow_control=False)
+    set_speed = HIGHWAY_MS
+    lead = make_lead(status=True, d_rel=25.0, v_rel=-4.0, v_lead=HIGHWAY_MS)
+    self._press(lng, pedal_pc=35.0, op_gas=0.3, v_ego=set_speed + 4.5, set_speed=set_speed)
+    self.assertTrue(self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=set_speed + 4.5,
+                                set_speed=set_speed).recovering)
+    result = self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=set_speed + 4.5,
+                         set_speed=set_speed, lead=lead)
+    self.assertFalse(result.recovering)
+
+  def test_no_recovery_when_the_release_is_already_at_the_set_speed(self):
+    lng = self._build(follow_control=False)
+    set_speed = HIGHWAY_MS
+    self._press(lng, pedal_pc=35.0, op_gas=0.3, v_ego=set_speed - 2.0, set_speed=set_speed)
+    self.assertFalse(self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=set_speed - 2.0,
+                                 set_speed=set_speed).recovering)
+
+  def test_recovery_gives_up_rather_than_holding_the_cap_forever(self):
+    lng = self._build(follow_control=False)
+    set_speed = HIGHWAY_MS
+    over = set_speed + 4.5
+    self._press(lng, pedal_pc=35.0, op_gas=0.3, v_ego=over, set_speed=set_speed)
+    self.assertTrue(self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=over,
+                                set_speed=set_speed).recovering)
+    for _ in range(int(_RECOVER_MAX_S / 0.02) + 2):        # speed never comes down
+      result = self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=over, set_speed=set_speed)
+    self.assertFalse(result.recovering)
 
   def test_an_inactive_message_carries_no_request_at_all(self):
     lng = self._build(follow_control=False)

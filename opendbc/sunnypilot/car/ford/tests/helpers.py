@@ -83,7 +83,7 @@ def make_cc_sp(model_curvature=0.0, lateral_delay=0.12, lane_change_state=0, lan
 
 def make_cs(v_ego=30.0, yaw_rate=0.0, steering_pressed=False, steering_angle=0.0,
             gas_pressed=False, brake_pressed=False, standstill=False, main_on=True,
-            pedal_pc=None):
+            pedal_pc=None, set_speed=0.0):
   # a press with no position given is a real one, well past any sane override threshold
   if pedal_pc is None:
     pedal_pc = 20.0 if gas_pressed else 0.0
@@ -91,7 +91,7 @@ def make_cs(v_ego=30.0, yaw_rate=0.0, steering_pressed=False, steering_angle=0.0
     vEgoRaw=v_ego, vEgo=v_ego, yawRate=yaw_rate,
     steeringPressed=steering_pressed, steeringAngleDeg=steering_angle,
     gasPressed=gas_pressed, brakePressed=brake_pressed,
-    cruiseState=SimpleNamespace(available=main_on, standstill=standstill),
+    cruiseState=SimpleNamespace(available=main_on, standstill=standstill, speed=set_speed),
   )
   return SimpleNamespace(
     out=out,

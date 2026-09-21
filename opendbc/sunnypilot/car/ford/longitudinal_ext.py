@@ -33,10 +33,11 @@ above 40 mph.
 """
 from collections import namedtuple
 
-from numpy import clip
+from numpy import clip, interp
 
 from opendbc.car.ford.values import CarControllerParams
-from opendbc.sunnypilot.car.ford.values_ext import PEDAL_OVERRIDE_RANGE
+from opendbc.sunnypilot.car.ford.values_ext import (PEDAL_ACCEL_BP, PEDAL_ACCEL_SPEED_BP,
+                                                    PEDAL_ACCEL_V, PEDAL_OVERRIDE_RANGE)
 
 LongitudinalResult = namedtuple('LongitudinalResult', [
   'acc_enabled',
@@ -46,9 +47,12 @@ LongitudinalResult = namedtuple('LongitudinalResult', [
   'precharge_actuate',
   'accel_pred',
   'follow_control_used',
+  'overriding',
+  'recovering',
 ])
 
 MS_TO_MPH = 2.23694
+_DT = 0.02          # this runs on the 50 Hz ACC frame
 
 # Speed band with hysteresis, so the feature does not flicker in and out around the threshold.
 _ENGAGE_ABOVE_MPH = 50.0
@@ -111,6 +115,25 @@ _GAS_CREEP_SPEED = 1.0
 # How a feathered pedal is told from a real press, and why the threshold is tunable rather
 # than fixed, is documented on PEDAL_OVERRIDE_RANGE in values_ext.
 
+# Handover hysteresis, m/s^2. The driver has to out-ask openpilot by this much to take over and
+# fall this far under it to give it back, so the two do not trade control every frame while the
+# pedal sits near the crossing.
+_HANDOVER_MARGIN = 0.15
+
+# Returning to the set speed after the driver has run past it.
+#
+# Coming off an override above the set speed, the planner wants the overspeed gone and will
+# brake for it. With nothing ahead there is no reason to: shedding it on a closed throttle is
+# what a driver does, and it is what was asked for. So the brake request is capped at what the
+# engine delivers on its own until the speed is back, and the cap is dropped the moment a lead
+# appears, because then the deceleration is not about the set speed any more.
+# The cap eases out over the last of the overspeed rather than being dropped in one frame,
+# which would put the step back in at the end of the very manoeuvre that exists to avoid it.
+_RECOVER_DECEL_CAP = -0.50        # m/s^2, inside closed-throttle authority on this platform
+_RECOVER_EXIT_MARGIN = 0.45       # m/s, about 1 mph of hysteresis on the set speed
+_RECOVER_BLEND_OVER = 0.9         # m/s of overspeed above which the cap is at full strength
+_RECOVER_MAX_S = 60.0             # give up rather than hold the cap forever
+
 
 def _tuned_pedal(value: float) -> float:
   """Clamp the stored threshold into range. A param that has never been written reads 0.0,
@@ -131,6 +154,10 @@ class LongitudinalExt:
     self.pedal_override_pc = _tuned_pedal(tuning.pedalOverrideThreshold)
 
     self.speed_allowed = False
+    self.overriding_last = False
+    self.recovering = False
+    self.recover_s = 0.0
+    self.set_speed = 0.0
     self.accel_last = 0.0
     self.brake_actuate_last = False
     self.gas_inactive_last = True
@@ -145,21 +172,68 @@ class LongitudinalExt:
       return 0.0
     return accel_due_to_pitch
 
-  def _driver_overriding(self, CS) -> bool:
+  @staticmethod
+  def driver_accel_request(pedal_pc: float, v_ego: float) -> float:
+    """What the driver's pedal is asking for, m/s^2. See PEDAL_ACCEL_V in values_ext."""
+    per_speed = [float(interp(pedal_pc, PEDAL_ACCEL_BP, row)) for row in PEDAL_ACCEL_V]
+    return float(interp(v_ego, PEDAL_ACCEL_SPEED_BP, per_speed))
+
+  def _driver_overriding(self, CS, op_gas: float) -> bool:
     """Whether the accelerator counts as a driver override.
 
-    Against the pedal position where the CarState has it, so a feathered pedal does not take
-    the whole ACCDATA inactive and cost the driver speed. gasPressed is the fallback for a
-    CarState that does not carry the position.
+    Not simply whether the pedal is down. openpilot keeps control until the driver is asking
+    for more acceleration than it is, and hands back when they drop under it again, so resting
+    or feathering the pedal under what cruise was already doing does not cost the driver speed.
+
+    The pedal is converted to an acceleration through the measured map rather than compared as
+    a position, because the same pedal buys different acceleration at different speeds. Below
+    the noise threshold nothing counts at all, and a CarState with no pedal position falls back
+    to gasPressed.
     """
     pedal = getattr(CS, "accelerator_pedal_pc", None)
     if pedal is None:
       return bool(CS.out.gasPressed)
-    return bool(CS.out.gasPressed) and pedal > self.pedal_override_pc
+    if not CS.out.gasPressed or pedal <= self.pedal_override_pc:
+      return False
+
+    asked = self.driver_accel_request(pedal, CS.out.vEgo)
+    if self.overriding_last:
+      return asked > op_gas - _HANDOVER_MARGIN
+    return asked > op_gas + _HANDOVER_MARGIN
+
+  def _update_recovery(self, CC, CS, overriding: bool, lead) -> None:
+    """Hold a light-deceleration recovery after the driver runs past the set speed.
+
+    Armed on release of an override that left the truck above the set speed with nothing
+    ahead. A lead means the deceleration is about the lead rather than the set speed, so
+    normal operation resumes straight away, which is what was asked for.
+    """
+    set_speed = float(CS.out.cruiseState.speed)
+    self.set_speed = set_speed
+    released = self.overriding_last and not overriding
+    self.overriding_last = overriding
+
+    if not CC.longActive or overriding:
+      self.recovering = False
+      self.recover_s = 0.0
+      return
+
+    if released and lead is None and set_speed > 0.0 and CS.out.vEgo > set_speed:
+      self.recovering = True
+      self.recover_s = 0.0
+
+    if not self.recovering:
+      return
+
+    self.recover_s += _DT
+    back_to_speed = set_speed <= 0.0 or CS.out.vEgo <= set_speed + _RECOVER_EXIT_MARGIN
+    if lead is not None or back_to_speed or self.recover_s >= _RECOVER_MAX_S:
+      self.recovering = False
+      self.recover_s = 0.0
 
   def update(self, CC, CC_SP, CS, op_accel, op_gas, accel_due_to_pitch) -> LongitudinalResult:
     """Narrow openpilot's accel and gas based on the lead, for one 50 Hz frame."""
-    overriding = self._driver_overriding(CS)
+    overriding = self._driver_overriding(CS, op_gas)
     # Brake hysteresis on the planner's own command, used whenever follow control is not driving
     brake_actuate = self.brake_actuate_last
     accel_pitch_compensated = op_accel + accel_due_to_pitch
@@ -172,6 +246,9 @@ class LongitudinalExt:
     accel, gas = op_accel, op_gas
     precharge_actuate = brake_actuate
     follow_control_used = False
+
+    lead_now = CC_SP.leadOne if CC_SP.leadOne.status else None
+    self._update_recovery(CC, CS, overriding, lead_now)
 
     if self.follow_control:
       v_ego_mph = CS.out.vEgo * MS_TO_MPH
@@ -213,6 +290,16 @@ class LongitudinalExt:
       brake_actuate = False
       precharge_actuate = False
 
+    # Shedding an overspeed the driver put on, with nothing ahead, is a job for a closed
+    # throttle rather than the brakes. Only ever eases the request, never deepens it.
+    if self.recovering:
+      over = CS.out.vEgo - self.set_speed
+      cap = float(interp(over, [_RECOVER_EXIT_MARGIN, _RECOVER_BLEND_OVER],
+                         [CarControllerParams.ACCEL_MIN, _RECOVER_DECEL_CAP]))
+      accel = max(accel, cap)
+      brake_actuate = brake_actuate and accel < _BRAKE_ENGAGE
+      precharge_actuate = precharge_actuate and accel < _PRECHARGE_ENGAGE
+
     self.accel_last = accel
 
     # Cmbb_B_Enbl and AccResumEnbl_B_Rq. Cleared while the driver is on the accelerator, so the
@@ -247,6 +334,8 @@ class LongitudinalExt:
       # PCM acts on the real request alone.
       accel_pred=CarControllerParams.INACTIVE_GAS,
       follow_control_used=follow_control_used,
+      overriding=overriding,
+      recovering=self.recovering,
     )
 
   def _gas_request(self, CC, CS, gas: float, brake_actuate: bool, overriding: bool) -> float:

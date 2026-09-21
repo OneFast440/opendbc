@@ -194,6 +194,26 @@ PSCM_LIM_STAT_UNRELIABLE_CANFD = True
 # untested, and raising this is how to find out.
 PEDAL_OVERRIDE_RANGE = (2.0, 0.0, 25.0)   # default, min, max
 
+# What the driver is asking for, in m/s^2, from accelerator pedal position and speed.
+#
+# The override is meant to hand over when the driver asks for more than openpilot already
+# is, and that comparison needs both sides in the same units. Pedal position is not an
+# acceleration, so it is measured: grade corrected, brakes off, above 7 mph, over eleven of
+# the owner's drives, 29718 samples. Medians per cell, which are monotonic in pedal and fall
+# with speed as the same pedal buys less acceleration.
+#
+# Only used to decide who is in control, never to command anything, so being a little off
+# costs a handover at a slightly wrong pedal position and nothing more. It errs toward
+# handing over: the rows read a given pedal as asking for slightly more than the median cell
+# did, so a driver on the edge gets control rather than openpilot keeping it.
+PEDAL_ACCEL_BP = (0.0, 3.0, 5.0, 7.5, 11.0, 15.5, 21.5, 32.0)        # percent
+PEDAL_ACCEL_SPEED_BP = (7.2, 15.6, 24.6)                             # m/s, the band centres
+PEDAL_ACCEL_V = (
+  (-0.21, -0.14, -0.02, 0.22, 0.48, 0.93, 1.31, 2.17),               # ~16 mph
+  (-0.27, -0.14, -0.06, -0.06, 0.06, 0.47, 0.97, 2.11),              # ~35 mph
+  (-0.29, -0.14, -0.09, -0.07, 0.09, 0.23, 0.77, 1.62),              # ~55 mph
+)
+
 LOW_SPEED_FACTOR_RANGE = (1.0, 0.5, 1.5)
 HIGH_SPEED_FACTOR_RANGE = (1.0, 0.5, 1.5)
 HIGH_SPEED_DAMPENING_RANGE = (1.0, 0.25, 1.25)
