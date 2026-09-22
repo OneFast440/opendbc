@@ -133,14 +133,15 @@ class TestAdaptiveGainConverges(unittest.TestCase):
     self.assertLess(ctrl.delivery_comp, 0.8)
 
   def test_breaks_the_deviation_clip_latch(self):
-    """Above 9 m/s the command is held within 0.002 1/m of the measurement. If the loop gain
-    k * G is above 1 that clip stops being a limit and becomes a latch: the car over-delivers,
-    the command follows the measurement up, and the car over-delivers on that. Off, this runs
-    to the DBC limit. On, the loop takes the gain back under 1 and the car lands on the request."""
-    k = 1.03  # k * G = 1.3 at 15 m/s on this platform's default schedule
+    """Above 9 m/s the command is held within 0.004 1/m of the measurement. If the loop gain
+    k * G is above 1 that clip stops being a limit and becomes a latch past a curvature of
+    band * kG / (kG - 1): the car over-delivers, the command follows the measurement up, and the
+    car over-delivers on that. Off, this runs away. On, the loop takes the gain back under 1 and
+    the car lands on the request."""
+    k = 1.1  # k * G = 1.39 at 15 m/s on this platform's default schedule: latches past ~0.014
     off = Plant(k, V_MID)
     closed_loop(angle_ctrl(enabled=False), off, 0.012, 600)
-    self.assertGreater(off.kappa, 0.012 * 1.5)
+    self.assertGreater(off.kappa, 0.012 * 2.0)
     on = Plant(k, V_MID)
     peak = closed_loop(angle_ctrl(), on, 0.012, 600)
     self.assertAlmostEqual(on.kappa / 0.012, 1.0, delta=0.03)

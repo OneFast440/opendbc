@@ -33,6 +33,7 @@ from opendbc.car.ford.values import CarControllerParams
 from opendbc.sunnypilot.car.ford.human_turn import HumanTurnDetector
 from opendbc.sunnypilot.car.ford.lateral_common import INACTIVE_RESULT, FordLateralResult, get_current_curvature
 from opendbc.sunnypilot.car.ford.values_ext import (
+  ANGLE_CURVATURE_ERROR,
   FORD_DBC_PATH_ANGLE_MAX,
   FORD_DBC_PATH_ANGLE_MIN,
   HIGH_SPEED_DAMPENING_RANGE,
@@ -115,10 +116,11 @@ _DBC_SAT_FRACTION = 0.90          # fraction of the DBC limit that counts as sat
 #
 # The ratio is measured against the *requested* curvature, before the deviation clip, not against
 # the clipped kappa_cmd that goes out as path_angle. That is deliberate and it is not what the
-# handoff suggested. The clip pins kappa_cmd at measured + CURVATURE_ERROR whenever the command
-# leads the car, which puts an algebraic floor of m / (m + 0.002) under any post-clip ratio: 0.83
-# at a 100 m radius, 0.91 at 50 m. A post-clip observer therefore cannot see attenuation at
-# exactly the curvatures where the PSCM attenuates. Requested-vs-delivered asks the question that
+# handoff suggested. The clip pins kappa_cmd at measured + ANGLE_CURVATURE_ERROR whenever the
+# command leads the car, which puts an algebraic floor of m / (m + 0.004) under any post-clip
+# ratio: 0.71 at a 100 m radius, 0.83 at 50 m. Against a 0.75 threshold a post-clip observer
+# cannot tell attenuation from the clip's own floor at exactly the curvatures where the PSCM
+# attenuates. Requested-vs-delivered asks the question that
 # matters anyway -- how much of what the planner wanted did the truck actually do -- and it counts
 # the clip's own throttling, which the saturation handling should respond to for the same reason.
 _SAT_OBS_LAG_S = 0.031            # s, measured actuator lag the comparison aligns to
@@ -163,11 +165,11 @@ _SAT_OBS_RATIO_NEUTRAL = 1.0      # what the filter holds while gated, i.e. "del
 # wheel angle at any speed; _ADAPT_ERR_SCALE of 0.005 1/m is roughly 18 degrees at the wheel.
 #
 # The plant is identified against kappa_cmd, the curvature the gain actually multiplied, not
-# against the request. Above 9 m/s the deviation clip holds kappa_cmd within 0.002 1/m of the
+# against the request. Above 9 m/s the deviation clip holds kappa_cmd within 0.004 1/m of the
 # measurement, so whenever the car is behind (an S-bend reversal, the clip's own steady-state
 # trap) the request-based ratio measures the clip and reads as a shortfall of 2x or more; chasing
 # it pushed the loop gain past 1, where the same clip turns into a latch: the car over-delivers,
-# the command follows the measurement up by up to 0.002, and the car over-delivers on that, all
+# the command follows the measurement up by up to 0.004, and the car over-delivers on that, all
 # the way to the DBC limit. That latch exists with this loop off, too, whenever k * G > 1, which
 # is what raising the speed factors does; it is the "too much" half of that trade. Against
 # kappa_cmd the estimate is the plant and nothing else. The request still sets how fast it
@@ -244,10 +246,14 @@ _EXIT_DESIRED_FALLING = 0.010     # (1/m) per call; below this a falling command
 
 # Post-override stall blip. After a driver-touch episode the PSCM can keep reporting InProgress
 # while honoring path_angle at only ~0.56x (healthy hands-free delivery is ~0.95). The
-# deviation clip below then pins kappa_cmd at measured + CURVATURE_ERROR, so the command can never
-# lead the car enough to overcome the attenuation -- a stall the driver reads as "not engaging".
+# deviation clip below then pins kappa_cmd at measured + ANGLE_CURVATURE_ERROR, so the command can
+# never lead the car enough to overcome the attenuation -- a stall the driver reads as "not
+# engaging".
 # A short mode-0 pulse (the same panda-clean wire pattern the human-turn override sends) resets
 # the PSCM's authority, after which path_angle ramps back in from zero through the soft ROC.
+# The trigger is how far the car is behind the planner, in absolute terms, and stays at the 0.004
+# 1/m it was validated at. It was written as twice the stock band; following the angle band to
+# 0.008 would have halved the detector's sensitivity for a reason unrelated to stalls.
 _STALL_GAP_MIN = 2.0 * CarControllerParams.CURVATURE_ERROR
 _STALL_HOLD_S = 0.5               # accumulated clip-binding time before a pulse fires
 _STALL_BLIP_FRAMES = 6            # 6 frames @ 20 Hz = 300 ms; the PSCM acked mode 0 in ~150 ms
@@ -258,6 +264,13 @@ _STALL_MAX_BLIPS = 3              # give up on a stuck episode rather than pulsi
 # sustained press resets the PSCM while the car is still straight and the command small.
 _PRESS_BLIP_MIN_S = 0.5
 _BLIP_MAX_PATH_ANGLE = 0.10       # rad -- the pulse releases steering for 300 ms; never in a curve
+# The stall pulse may also fire when the truck itself is barely turning, whatever the command
+# says. A small command was only ever a proxy for "not in a curve", and during a stall the command
+# is by definition not what the car is doing: it is pinned at measured + ANGLE_CURVATURE_ERROR,
+# i.e. 0.004 * v * G, which crosses 0.10 rad above about 26 m/s with the car dead straight. The
+# yaw rate is the same allowance measured on the truck (path_angle ~ kappa * v at a gain near 1),
+# so a total stall on the highway still gets its reset, and a real curve still blocks it.
+_BLIP_MAX_YAW_RATE = 0.10         # rad/s
 
 def adapt_time_constant(error: float) -> float:
   """How fast the adaptive gain walks toward its target, given how far the car is off the
@@ -598,19 +611,20 @@ class LateralAngleExt:
         precision = 0
 
     # *** deviation clip ***
-    # Clip to measured curvature +- CURVATURE_ERROR, the same clip the stock curvature path
-    # applies. Without it kappa_cmd -- and therefore path_angle, and the shadow curvature the
-    # panda checks -- can legitimately lead the measurement by more than the safety tolerance
-    # during ordinary curve entry, and the deviation check would block routinely rather than only
-    # on a genuine divergence. Clipping the steering intent itself, not just the reported value,
-    # is what keeps that check meaningful.
+    # Clip to measured curvature +- ANGLE_CURVATURE_ERROR, the same kind of clip the stock
+    # curvature path applies, at the wider band the panda allows in angle mode (see values_ext).
+    # Without it kappa_cmd -- and therefore path_angle, and the shadow curvature the panda
+    # checks -- can legitimately lead the measurement by more than the safety tolerance during
+    # ordinary curve entry, and the deviation check would block routinely rather than only on a
+    # genuine divergence. Clipping the steering intent itself, not just the reported value, is
+    # what keeps that check meaningful.
     kappa_cmd = float(requested_curvature)
     current_curvature = get_current_curvature(CS)
     self.curvature_deviation_limited = False
     if v_ego > 9:
       kappa_pre_clip = kappa_cmd
-      kappa_cmd = float(clip(kappa_cmd, current_curvature - CarControllerParams.CURVATURE_ERROR,
-                             current_curvature + CarControllerParams.CURVATURE_ERROR))
+      kappa_cmd = float(clip(kappa_cmd, current_curvature - ANGLE_CURVATURE_ERROR,
+                             current_curvature + ANGLE_CURVATURE_ERROR))
       self.curvature_deviation_limited = abs(kappa_cmd - kappa_pre_clip) > 1e-9
 
     # No curvature clamp here, deliberately. CURVATURE_MAX is the range of the c2 signal, and angle
@@ -694,8 +708,10 @@ class LateralAngleExt:
     if stalled:
       if self.curvature_deviation_limited and self.stall_blip_cooldown_s <= 0.0:
         self.stall_blip_hold_s += _STEER_DT
+      not_in_a_curve = (abs(self.path_angle_last) < _BLIP_MAX_PATH_ANGLE
+                        or abs(current_curvature) * CS.out.vEgoRaw < _BLIP_MAX_YAW_RATE)
       if (self.stall_blip_hold_s >= _STALL_HOLD_S and self.stall_blip_count < _STALL_MAX_BLIPS
-          and abs(self.path_angle_last) < _BLIP_MAX_PATH_ANGLE):
+          and not_in_a_curve):
         self.stall_blip_frames_left = _STALL_BLIP_FRAMES
         self.stall_blip_hold_s = 0.0
         self.stall_blip_count += 1

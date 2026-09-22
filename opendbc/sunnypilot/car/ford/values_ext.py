@@ -89,6 +89,17 @@ T_IDXS = [
 
 # DBC LatCtlCurv_No_Actl magnitude limit (1/m). Also the panda's FORD_STEERING_LIMITS.max_curvature.
 CURVATURE_MAX = 0.02
+# Angle mode's commanded-vs-measured curvature band (1/m), twice the stock
+# CarControllerParams.CURVATURE_ERROR. Mirrored by the panda (FORD_ANGLE_STEERING_LIMITS in
+# safety/modes/ford.h), and only in angle mode: stock and curvature mode keep 0.002.
+#
+# The band is what limits curve entry above 9 m/s, not the gain or the rate limit. The command
+# may only lead the measurement by this much, so curvature builds at about band / plant response
+# (~0.25 s): at 0.002 that capped turn-in near 0.8 m/s^3 of lateral jerk at 10 m/s and 1.8 at
+# 15 m/s. The cost is the check's reach: a runaway command can now lead the truck by 0.004 1/m
+# before the panda blocks it, about 0.9 m/s^2 of unexpected lateral acceleration at 15 m/s
+# instead of 0.45.
+ANGLE_CURVATURE_ERROR = 0.004
 # DBC LatCtlCurv_NoRate_Actl / LatCtlCrv_NoRate2_Actl magnitude limit (1/m^2).
 CURVATURE_RATE_MAX = 0.001023
 # DBC LatCtlPath_An_Actl range (rad). The panda mirror lives in safety/modes/ford.h; the PSCM

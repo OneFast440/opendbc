@@ -125,6 +125,15 @@ class TestLateralCurvExt(unittest.TestCase):
     self._step(v_ego=30.0, yaw_rate=0.0, curvature=0.02)
     self.assertTrue(self.lat.curvature_deviation_limited)
 
+  def test_keeps_the_stock_band(self):
+    """Angle mode's band widened to 0.004; c2 is the actuator here and keeps the stock 0.002.
+    Ramp until the band, not the rate limit, is what holds the command."""
+    last, peak = 0.0, 0.0
+    for _ in range(int(5.0 / STEER_DT)):
+      last = self._step(v_ego=30.0, yaw_rate=0.0, curvature=0.02, last=last).apply_curvature
+      peak = max(peak, abs(last))
+    self.assertAlmostEqual(peak, CarControllerParams.CURVATURE_ERROR, places=6)
+
   def test_human_turn_hands_back(self):
     """A sustained manual turn drops to mode 0 rather than holding the mode active with zeroed
     signals, which is what needs a safety bypass in BluePilot."""

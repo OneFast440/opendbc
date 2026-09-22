@@ -317,6 +317,23 @@ static bool ford_curvature_cmd_checks(int desired_curvature, bool steer_control_
 static bool ford_bp_tx_checks(bool steer_control_enabled, unsigned int raw_curvature,
                               unsigned int raw_path_angle, unsigned int raw_path_offset,
                               unsigned int raw_curvature_rate, unsigned int inactive_curvature_rate) {
+  // Angle mode's deviation band is twice the stock one: 0.004 rather than 0.002 1/m. It mirrors
+  // values_ext.py ANGLE_CURVATURE_ERROR, which openpilot clips its command to. The band, not the
+  // gain or the rate limit, is what bounds curve entry above curvature_error_min_speed: the
+  // command may lead the measurement only this far, so curvature builds at roughly band / plant
+  // response. The cost is the check's reach: a command running away from the truck is caught
+  // 0.004 1/m out instead of 0.002 (about 0.9 m/s^2 of lateral acceleration at 15 m/s, not 0.45).
+  // Only the shadow check below uses these limits. Stock and curvature mode, where c2 is the
+  // actuator, keep FORD_STEERING_LIMITS unchanged, and so does the real-time rate check.
+  static const CurvatureSteeringLimits FORD_ANGLE_STEERING_LIMITS = {
+    .max_curvature = 1000,              // 0.02 rad/m * curvature_to_can
+    .curvature_to_can = 50000,          // CAN units per rad/m
+    .frequency = 20,                    // Hz
+    .max_curvature_error = 200,         // 0.004 rad/m * curvature_to_can
+    .curvature_error_min_speed = 10.0,  // m/s
+    .max_steer_power = 0,               // disabled, Ford has no steed power signal
+  };
+
   bool violation = false;
 
   // c0 is computed by both strategies but never sent: c0 and c1 fight each other on this
@@ -338,7 +355,7 @@ static bool ford_bp_tx_checks(bool steer_control_enabled, unsigned int raw_curva
     violation |= raw_curvature_rate != inactive_curvature_rate;
     violation |= ford_path_angle_cmd_checks(desired_path_angle, steer_control_enabled, 0);
     violation |= ford_shadow_curvature_checks(ford_shadow_curvature_to_can(ford_shadow_curvature_raw),
-                                              steer_control_enabled, FORD_STEERING_LIMITS);
+                                              steer_control_enabled, FORD_ANGLE_STEERING_LIMITS);
 
     // path_angle's rate limit is per message, so without this openpilot could slew five times
     // faster than intended simply by sending LateralMotionControl at 100 Hz instead of 20 Hz.
