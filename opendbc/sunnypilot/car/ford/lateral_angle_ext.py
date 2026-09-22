@@ -172,8 +172,17 @@ _SAT_OBS_HIST_LEN = _SAT_OBS_LAG_IDX + 2
 
 # Soft rate-of-change limit on path_angle, per lateral call (20 Hz). Deliberately slightly
 # tighter than the panda mirror in safety/modes/ford.h so openpilot never provokes a block.
-_SOFT_ROC_SPEED_BP = [9.0, 10.0, 15.0, 25.0]      # m/s
-_SOFT_ROC_V = [0.055, 0.055, 0.0425, 0.009]       # rad/call
+#
+# Sized from the lateral jerk it admits rather than tuned by feel: path_angle = kappa * v * G, so
+# d(path_angle)/dt = J * G / v, where J is lateral jerk. clip_curvature already bounds J (5 m/s^3
+# by default, up to 12 when FordLateralJerkLimit is raised), so this limit exists only to catch a
+# runaway command and must sit above that bound, not below it. The nodes follow 0.9 / v rad/call,
+# i.e. J * G = 18 m/s^3: the largest jerk limit (12) times a typical schedule gain (1.5). The old
+# table allowed about 3.9 m/s^3 at 25 m/s, which clipped commands clip_curvature had already
+# passed and was the highway S-bend lag. Linear interpolation between the nodes stays above
+# 0.9 / v (the chord of a convex curve), so the jerk bound is met everywhere, not just at nodes.
+_SOFT_ROC_SPEED_BP = [10.0, 18.0, 35.0]           # m/s
+_SOFT_ROC_V = [0.090, 0.050, 0.0257]              # rad/call
 
 # Exit-biased blend: near the DBC limit, or while the planner is actively unwinding, drop the
 # model's weight so the planner's unwind dominates instead of being diluted by a prediction that

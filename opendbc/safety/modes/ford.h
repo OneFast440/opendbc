@@ -147,12 +147,11 @@ static int ford_shadow_curvature_to_can(int raw) {
 // looser and never blocks a well-behaved command. Values are per call, and
 // LateralMotionControl(2) is sent once per CarControllerParams.STEER_STEP (5), i.e. at 20 Hz.
 static bool ford_path_angle_cmd_checks(int desired_path_angle, bool steer_control_enabled, int max_path_angle) {
-  // angle mode: mirrors lateral_angle_ext.py _SOFT_ROC_*. lookup_t holds three points;
-  // openpilot's 9 and 10 m/s nodes are both 0.055 (flat top), so {10, 15, 25} reproduces the
-  // curve exactly and lower speeds clamp to the first point.
+  // angle mode: mirrors lateral_angle_ext.py _SOFT_ROC_* node for node (three points, the same
+  // as lookup_t holds), so lower speeds clamp to the first point exactly as openpilot does.
   static const struct lookup_t FORD_ANGLE_PATH_ANGLE_ROC = {
-    {10., 15., 25.},
-    {0.0561, 0.04335, 0.00918}
+    {10., 18., 35.},
+    {0.0918, 0.051, 0.026214}
   };
   // curvature mode: mirrors lateral_curv_ext.py _LC_PATH_ANGLE_ROC_*, where c1 is only a
   // centering trim and moves two orders of magnitude more slowly.

@@ -1,3 +1,5 @@
+import os
+import re
 import unittest
 
 from opendbc.car import DT_CTRL
@@ -8,7 +10,9 @@ from opendbc.sunnypilot.car.ford.human_turn import (
   HUMAN_TURN_HOLD_PRETURNED_S,
   HUMAN_TURN_HOLD_S,
 )
-from opendbc.sunnypilot.car.ford.lateral_angle_ext import LateralAngleExt
+from numpy import interp
+
+from opendbc.sunnypilot.car.ford.lateral_angle_ext import _SOFT_ROC_SPEED_BP, _SOFT_ROC_V, LateralAngleExt
 from opendbc.sunnypilot.car.ford.tests.helpers import make_actuators, make_car_params, make_cc, make_cc_sp, make_cs
 from opendbc.sunnypilot.car.ford.values_ext import (
   FORD_DBC_PATH_ANGLE_MAX,
@@ -90,7 +94,8 @@ class TestLateralAngleExt(unittest.TestCase):
 
   def test_soft_rate_limit(self):
     """A large step in commanded curvature cannot produce a large step in path_angle."""
-    for v_ego, max_step in ((10.0, 0.055), (15.0, 0.0425), (25.0, 0.009)):
+    for v_ego in (10.0, 15.0, 25.0, 35.0):
+      max_step = float(interp(v_ego, _SOFT_ROC_SPEED_BP, _SOFT_ROC_V))
       lat = LateralAngleExt(self.CP, self.CP_SP)
       last = 0.0
       for _ in range(5):
@@ -99,6 +104,28 @@ class TestLateralAngleExt(unittest.TestCase):
         self.assertLessEqual(abs(result.path_angle - last), max_step + 1e-9,
                              f"step too large at {v_ego} m/s")
         last = result.path_angle
+
+  def test_soft_rate_limit_admits_the_jerk_clip_curvature_allows(self):
+    """The limit is a runaway backstop, not a second jerk limit. It must pass the largest
+    lateral jerk FordLateralJerkLimit can set (12 m/s^3) at a typical gain of 1.5: J * G / v
+    rad/s, i.e. 0.9 / v rad per call. The table it replaced let through 3.9 m/s^3 at 25 m/s."""
+    for v_ego in (10.0, 12.0, 15.0, 18.0, 22.0, 25.0, 30.0, 35.0):
+      soft_roc = float(interp(v_ego, _SOFT_ROC_SPEED_BP, _SOFT_ROC_V))
+      self.assertGreaterEqual(soft_roc, 0.9 / v_ego - 1e-4, f"{v_ego} m/s")
+
+  def test_soft_rate_limit_is_mirrored_by_the_panda(self):
+    """ford.h holds the same nodes x1.02, so the panda never blocks what openpilot sends and
+    never allows much more. Read from the source so the two cannot drift apart."""
+    ford_h = os.path.join(os.path.dirname(__file__), "../../../../safety/modes/ford.h")
+    with open(ford_h) as f:
+      src = f.read()
+    table = re.search(r"FORD_ANGLE_PATH_ANGLE_ROC = \{\s*\{([^}]*)\},\s*\{([^}]*)\}", src)
+    self.assertIsNotNone(table)
+    bp = [float(x.strip().rstrip(".")) for x in table.group(1).split(",")]
+    v = [float(x) for x in table.group(2).split(",")]
+    self.assertEqual(bp, list(_SOFT_ROC_SPEED_BP))
+    for panda, ours in zip(v, _SOFT_ROC_V, strict=True):
+      self.assertAlmostEqual(panda, ours * 1.02, places=5)
 
   def test_never_exceeds_dbc_range(self):
     lat = LateralAngleExt(self.CP, self.CP_SP)

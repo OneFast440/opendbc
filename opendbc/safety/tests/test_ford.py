@@ -615,8 +615,8 @@ class TestFordCANFDLongitudinalSafety(TestFordLongitudinalSafetyBase):
 # because c2 is still the actuator there and must keep every stock protection.
 
 PATH_ANGLE_TO_CAN = 2000            # 1 / 0.0005 rad per LSB
-PATH_ANGLE_ROC_BP = [10., 15., 25.]
-PATH_ANGLE_ROC_V = [0.0561, 0.04335, 0.00918]
+PATH_ANGLE_ROC_BP = [10., 18., 35.]
+PATH_ANGLE_ROC_V = [0.0918, 0.051, 0.026214]
 
 
 class FordBluePilotSafetyHarness(unittest.TestCase):
