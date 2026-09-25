@@ -615,8 +615,8 @@ class TestFordCANFDLongitudinalSafety(TestFordLongitudinalSafetyBase):
 # because c2 is still the actuator there and must keep every stock protection.
 
 PATH_ANGLE_TO_CAN = 2000            # 1 / 0.0005 rad per LSB
-PATH_ANGLE_ROC_BP = [10., 18., 35.]
-PATH_ANGLE_ROC_V = [0.0918, 0.051, 0.026214]
+PATH_ANGLE_ROC_BP = [10., 15., 25.]
+PATH_ANGLE_ROC_V = [0.0561, 0.04335, 0.00918]
 
 
 class FordBluePilotSafetyHarness(unittest.TestCase):
@@ -728,10 +728,6 @@ class FordBluePilotSafetyHarness(unittest.TestCase):
 
 class TestFordAngleControlSafetyBase(FordBluePilotSafetyHarness):
   LATERAL_MODE = int(PrimaryLateralControl.angle)
-  # angle mode's own deviation band: FORD_ANGLE_STEERING_LIMITS, mirrored by values_ext.py
-  # ANGLE_CURVATURE_ERROR. Stock and curvature mode keep the harness's 0.002.
-  MAX_CURVATURE_ERROR = 0.004
-  STOCK_CURVATURE_ERROR = FordBluePilotSafetyHarness.MAX_CURVATURE_ERROR
 
   def test_angle_mode_is_active(self):
     """The SP param actually selected the angle branch, so the rest of these tests mean something.
@@ -833,8 +829,7 @@ class TestFordAngleControlSafetyBase(FordBluePilotSafetyHarness):
     signal itself is pinned at zero -- otherwise angle mode has no deviation protection at all."""
     speed = 30.0
     for measured in (-0.01, 0.0, 0.01):
-      for scale in (-3.0, -1.25, -0.75, 0.0, 0.75, 1.25, 3.0):
-        delta = scale * self.MAX_CURVATURE_ERROR
+      for delta in (-0.006, -0.0025, 0.0, 0.0025, 0.006):
         shadow = measured + delta
         self._engage(speed, curvature=measured, shadow=shadow)
         # the measurement is sampled over 6 frames, hence the extra tolerance on the boundary
@@ -842,22 +837,6 @@ class TestFordAngleControlSafetyBase(FordBluePilotSafetyHarness):
           continue
         self.assertEqual(abs(delta) <= self.MAX_CURVATURE_ERROR, self._tx(self._lat_ctl_msg(True, 0.0)),
                          f"measured {measured} shadow {shadow}")
-
-  def test_band_is_wider_than_stock_in_angle_mode_only(self):
-    """Between the stock 0.002 and angle mode's 0.004 a command leads the measurement further than
-    stock would allow and must pass; just past 0.004 it must not. Curvature mode's 0.002 is held
-    by CurvatureModeMixin.test_keeps_the_stock_deviation_band, stock's by test_curvature_rate_limits."""
-    self.assertEqual(self.MAX_CURVATURE_ERROR, 2 * self.STOCK_CURVATURE_ERROR)
-    speed = self.CURVATURE_ERROR_MIN_SPEED + 5.0
-    for measured in (-0.008, 0.0, 0.008):
-      for sign in (1, -1):
-        with self.subTest(measured=measured, sign=sign):
-          wider = measured + sign * (self.STOCK_CURVATURE_ERROR + self.MAX_CURVATURE_ERROR) / 2
-          self._engage(speed, curvature=measured, shadow=wider)
-          self.assertTrue(self._tx(self._lat_ctl_msg(True, 0.0)), f"measured {measured} shadow {wider}")
-          past = measured + sign * self.MAX_CURVATURE_ERROR * 1.2
-          self._engage(speed, curvature=measured, shadow=past)
-          self.assertFalse(self._tx(self._lat_ctl_msg(True, 0.0)), f"measured {measured} shadow {past}")
 
   def test_deviation_band_clamps_the_measurement_to_the_commandable_range(self):
     """A corner tighter than max_curvature above the band's speed floor must still be steerable.
@@ -1091,26 +1070,6 @@ class CurvatureModeMixin:
           self._set_prev_desired_angle(0)
           self.assertEqual(should_tx, self._tx(self._lat_ctl_msg(True, 0, 0, sign * delta, 0)),
                            f"{speed} m/s, step {sign * delta}")
-
-  def test_keeps_the_stock_deviation_band(self):
-    """Angle mode's band is 0.004; curvature mode steers with c2 and must keep the stock 0.002.
-
-    test_curvature_rate_limits above cannot show this: above the band's speed floor BluePilot's
-    rate table is always the tighter of the two, so a widened band there changes nothing it
-    measures. Here the previous command equals the new one, so the rate step is zero and the band
-    is the only thing deciding."""
-    small = 2 / self.DEG_TO_CAN
-    for speed in (self.CURVATURE_ERROR_MIN_SPEED + 2.0, 25.0):
-      for measured in (-0.008, 0.0, 0.008):
-        for sign in (-1, 1):
-          # just inside the stock band passes; between the stock and angle-mode bands does not
-          for offset, should_tx in ((self.MAX_CURVATURE_ERROR - small, True), (self.MAX_CURVATURE_ERROR * 1.5, False)):
-            command = measured + sign * offset
-            with self.subTest(speed=speed, measured=measured, command=command):
-              self.safety.set_controls_allowed(True)
-              self._reset_curvature_measurement(measured, speed)
-              self._set_prev_desired_angle(command)
-              self.assertEqual(should_tx, self._tx(self._lat_ctl_msg(True, 0, 0, command, 0)))
 
   def test_rate_limit_is_looser_than_the_iso_envelope(self):
     """The point of the change: a step the ISO lateral jerk envelope would reject is accepted

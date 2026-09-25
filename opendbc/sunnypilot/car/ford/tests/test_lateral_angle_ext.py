@@ -1,5 +1,3 @@
-import os
-import re
 import unittest
 
 from opendbc.car import DT_CTRL
@@ -10,12 +8,9 @@ from opendbc.sunnypilot.car.ford.human_turn import (
   HUMAN_TURN_HOLD_PRETURNED_S,
   HUMAN_TURN_HOLD_S,
 )
-from numpy import interp
-
-from opendbc.sunnypilot.car.ford.lateral_angle_ext import _SOFT_ROC_SPEED_BP, _SOFT_ROC_V, LateralAngleExt
+from opendbc.sunnypilot.car.ford.lateral_angle_ext import LateralAngleExt
 from opendbc.sunnypilot.car.ford.tests.helpers import make_actuators, make_car_params, make_cc, make_cc_sp, make_cs
 from opendbc.sunnypilot.car.ford.values_ext import (
-  ANGLE_CURVATURE_ERROR,
   FORD_DBC_PATH_ANGLE_MAX,
   FORD_DBC_PATH_ANGLE_MIN,
   PrimaryLateralControl,
@@ -95,8 +90,7 @@ class TestLateralAngleExt(unittest.TestCase):
 
   def test_soft_rate_limit(self):
     """A large step in commanded curvature cannot produce a large step in path_angle."""
-    for v_ego in (10.0, 15.0, 25.0, 35.0):
-      max_step = float(interp(v_ego, _SOFT_ROC_SPEED_BP, _SOFT_ROC_V))
+    for v_ego, max_step in ((10.0, 0.055), (15.0, 0.0425), (25.0, 0.009)):
       lat = LateralAngleExt(self.CP, self.CP_SP)
       last = 0.0
       for _ in range(5):
@@ -105,28 +99,6 @@ class TestLateralAngleExt(unittest.TestCase):
         self.assertLessEqual(abs(result.path_angle - last), max_step + 1e-9,
                              f"step too large at {v_ego} m/s")
         last = result.path_angle
-
-  def test_soft_rate_limit_admits_the_jerk_clip_curvature_allows(self):
-    """The limit is a runaway backstop, not a second jerk limit. It must pass the largest
-    lateral jerk FordLateralJerkLimit can set (12 m/s^3) at a typical gain of 1.5: J * G / v
-    rad/s, i.e. 0.9 / v rad per call. The table it replaced let through 3.9 m/s^3 at 25 m/s."""
-    for v_ego in (10.0, 12.0, 15.0, 18.0, 22.0, 25.0, 30.0, 35.0):
-      soft_roc = float(interp(v_ego, _SOFT_ROC_SPEED_BP, _SOFT_ROC_V))
-      self.assertGreaterEqual(soft_roc, 0.9 / v_ego - 1e-4, f"{v_ego} m/s")
-
-  def test_soft_rate_limit_is_mirrored_by_the_panda(self):
-    """ford.h holds the same nodes x1.02, so the panda never blocks what openpilot sends and
-    never allows much more. Read from the source so the two cannot drift apart."""
-    ford_h = os.path.join(os.path.dirname(__file__), "../../../../safety/modes/ford.h")
-    with open(ford_h) as f:
-      src = f.read()
-    table = re.search(r"FORD_ANGLE_PATH_ANGLE_ROC = \{\s*\{([^}]*)\},\s*\{([^}]*)\}", src)
-    self.assertIsNotNone(table)
-    bp = [float(x.strip().rstrip(".")) for x in table.group(1).split(",")]
-    v = [float(x) for x in table.group(2).split(",")]
-    self.assertEqual(bp, list(_SOFT_ROC_SPEED_BP))
-    for panda, ours in zip(v, _SOFT_ROC_V, strict=True):
-      self.assertAlmostEqual(panda, ours * 1.02, places=5)
 
   def test_never_exceeds_dbc_range(self):
     lat = LateralAngleExt(self.CP, self.CP_SP)
@@ -148,27 +120,12 @@ class TestLateralAngleExt(unittest.TestCase):
     self.assertGreater(abs(self.lat.shadow_curvature), iso_envelope)
 
   def test_deviation_clip_binds_and_is_reported(self):
-    """The command is clipped to measured curvature +- ANGLE_CURVATURE_ERROR, the band the panda
-    allows in angle mode. Without it the shadow would leave that band routinely."""
+    """The command is clipped to measured curvature +- CURVATURE_ERROR, the same clip the stock
+    curvature path applies. Without it the shadow would leave the panda's error band routinely."""
     result = self._run(v_ego=30.0, yaw_rate=0.0, curvature=0.02)
     self.assertTrue(self.lat.curvature_deviation_limited)
-    self.assertAlmostEqual(abs(self.lat.shadow_curvature), ANGLE_CURVATURE_ERROR, places=9)
+    self.assertLessEqual(abs(self.lat.shadow_curvature), CarControllerParams.CURVATURE_ERROR + 1e-9)
     self.assertGreater(result.path_angle, 0.0)
-
-  def test_angle_band_is_twice_stock_and_mirrors_the_panda(self):
-    """Angle mode leads the measurement by up to 0.004, stock and curvature mode by 0.002, and
-    ford.h holds exactly those two numbers. Read from the source so neither side can drift."""
-    self.assertEqual(ANGLE_CURVATURE_ERROR, 2 * CarControllerParams.CURVATURE_ERROR)
-    ford_h = os.path.join(os.path.dirname(__file__), "../../../../safety/modes/ford.h")
-    with open(ford_h) as f:
-      src = f.read()
-    for name, expected in (("FORD_STEERING_LIMITS", CarControllerParams.CURVATURE_ERROR),
-                           ("FORD_ANGLE_STEERING_LIMITS", ANGLE_CURVATURE_ERROR)):
-      block = re.search(name + r" = \{(.*?)\};", src, re.S)
-      self.assertIsNotNone(block, name)
-      error = int(re.search(r"\.max_curvature_error = (\d+)", block.group(1)).group(1))
-      to_can = int(re.search(r"\.curvature_to_can = (\d+)", block.group(1)).group(1))
-      self.assertAlmostEqual(error / to_can, expected, places=9, msg=name)
 
   def test_no_deviation_clip_at_low_speed(self):
     self._run(v_ego=5.0, yaw_rate=0.0, curvature=0.02)
@@ -192,7 +149,7 @@ class TestLateralAngleExt(unittest.TestCase):
     # on release the command ramps back in from zero rather than snapping to a stale value
     released = self.lat.update(make_cc(), make_cc_sp(), make_cs(v_ego=15.0), make_actuators(0.01))
     self.assertFalse(released.lat_inactive)
-    self.assertLessEqual(abs(released.path_angle), float(interp(15.0, _SOFT_ROC_SPEED_BP, _SOFT_ROC_V)) + 1e-9)
+    self.assertLessEqual(abs(released.path_angle), 0.0425 + 1e-9)
 
   def test_grabbing_an_already_turned_wheel_needs_a_longer_hold(self):
     """Lateral control turns the wheel past the angle threshold on its own in a curve, so a brief
@@ -247,32 +204,6 @@ class TestLateralAngleExt(unittest.TestCase):
         fired = True
         break
     self.assertTrue(fired, "stall blip never fired while the deviation clip was pinned")
-
-  def test_stall_blip_fires_on_a_highway_stall(self):
-    """The command a total stall pins is 0.004 * v * G, past the 0.10 rad small-command guard above
-    about 26 m/s. The truck going straight is what makes the pulse safe, and it still fires."""
-    for v_ego in (26.0, 30.0, 35.0):
-      lat = LateralAngleExt(self.CP, self.CP_SP)
-      fired, held = False, 0.0
-      for _ in range(int(3.0 / STEER_DT)):
-        result = lat.update(make_cc(), make_cc_sp(), make_cs(v_ego=v_ego, yaw_rate=0.0), make_actuators(0.02))
-        if result.lat_inactive:
-          fired = True
-          self.assertGreater(abs(held), 0.10, "test is not exercising the yaw arm")
-          break
-        held = result.path_angle
-      self.assertTrue(fired, f"stall blip never fired at {v_ego} m/s")
-
-  def test_stall_blip_never_fires_in_a_real_curve(self):
-    """A stalled command in a curve the truck is genuinely turning: both the command and the yaw
-    rate are past the guard, so releasing steering for 300 ms is not allowed."""
-    v_ego, measured = 30.0, 0.005    # 0.15 rad/s of yaw, 4.5 m/s^2
-    lat = LateralAngleExt(self.CP, self.CP_SP)
-    for _ in range(int(3.0 / STEER_DT)):
-      result = lat.update(make_cc(), make_cc_sp(), make_cs(v_ego=v_ego, yaw_rate=-measured * v_ego),
-                          make_actuators(0.02))
-      self.assertFalse(result.lat_inactive, "stall blip fired mid-curve")
-    self.assertTrue(lat.curvature_deviation_limited)
 
   def test_lane_change_scaling(self):
     """The lane change factor scales authority only in the direction of the change."""

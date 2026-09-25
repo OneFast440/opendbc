@@ -10,6 +10,8 @@ import unittest
 
 from opendbc.car.ford.values import CAR
 from opendbc.sunnypilot.car.ford.lateral_angle_ext import (
+  _DELIVERY_COMP_MAX,
+  _DELIVERY_COMP_MIN_RATIO,
   _SAT_OBS_ENTER,
   _SAT_OBS_EXIT,
   _SAT_OBS_HIST_LEN,
@@ -211,3 +213,83 @@ class TestSaturationObserver(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
+
+
+class TestDeliveryCompensation(unittest.TestCase):
+  """Acting on the measured shortfall rather than only flagging it.
+
+  The observer above decides whether the module has stopped following. This decides how much
+  extra path_angle to ask for so that it does, which is a loop around live steering, so most of
+  what follows is about the cases where it must NOT wind up.
+  """
+
+  def test_off_by_default(self):
+    CP, CP_SP = make_car_params(CAR.FORD_F_150_MK14, mode=PrimaryLateralControl.angle)
+    self.assertFalse(CP_SP.fordLateralTuning.deliveryCompensation)
+    self.assertFalse(LateralAngleExt(CP, CP_SP).delivery_comp_enabled)
+
+  def test_neutral_until_something_is_measured(self):
+    ctrl = angle_ctrl(delivery_compensation=True)
+    self.assertAlmostEqual(ctrl.delivery_comp, 1.0)
+
+  def test_winds_in_on_a_measured_shortfall(self):
+    """0.90 delivered against 1.00 commanded wants about 1.11 of extra gain."""
+    ctrl = drive(angle_ctrl(delivery_compensation=True), 300, KAPPA, KAPPA * 0.90)
+    self.assertGreater(ctrl.delivery_comp, 1.05)
+    self.assertLessEqual(ctrl.delivery_comp, _DELIVERY_COMP_MAX)
+
+  def test_never_cuts_the_command(self):
+    """Over-delivery is not a licence to steer less: a cambered road or a nudge reads that way."""
+    ctrl = drive(angle_ctrl(delivery_compensation=True), 300, KAPPA, KAPPA * 1.30)
+    self.assertAlmostEqual(ctrl.delivery_comp, 1.0, places=3)
+
+  def test_capped(self):
+    ctrl = drive(angle_ctrl(delivery_compensation=True), 600, KAPPA, KAPPA * 0.85)
+    self.assertLessEqual(ctrl.delivery_comp, _DELIVERY_COMP_MAX)
+
+  def test_ignores_a_ratio_too_low_to_be_a_gain(self):
+    """Below the floor the measurement is broken, not a target to extrapolate from.
+
+    1/0.30 is 3.33, so chasing it would peg the correction at the cap. Instead it drifts back
+    to neutral: the small residual is the wind-up from before the filter crossed the floor,
+    still decaying.
+    """
+    ctrl = drive(angle_ctrl(delivery_compensation=True), 300, KAPPA, KAPPA * 0.30)
+    self.assertLess(ctrl.delivery_ratio, _DELIVERY_COMP_MIN_RATIO)
+    self.assertLess(ctrl.delivery_comp, 1.01)
+    before = ctrl.delivery_comp
+    drive(ctrl, 200, KAPPA, KAPPA * 0.30)
+    self.assertLess(ctrl.delivery_comp, before)
+
+  def test_decays_back_while_the_driver_is_steering(self):
+    ctrl = drive(angle_ctrl(delivery_compensation=True), 300, KAPPA, KAPPA * 0.90)
+    wound = ctrl.delivery_comp
+    self.assertGreater(wound, 1.05)
+    drive(ctrl, 400, KAPPA, KAPPA * 0.90, steering_pressed=True)
+    self.assertLess(ctrl.delivery_comp, wound)
+    self.assertAlmostEqual(ctrl.delivery_comp, 1.0, places=2)
+
+  def test_it_raises_path_angle_and_leaves_the_shadow_alone(self):
+    """The panda deviation-checks the shadow, which is kappa_cmd. Only path_angle may move."""
+    plain = drive(angle_ctrl(), 300, KAPPA, KAPPA * 0.90)
+    comp = drive(angle_ctrl(delivery_compensation=True), 300, KAPPA, KAPPA * 0.90)
+    cc = make_cc(lat_active=True, curvature=KAPPA)
+    cc_sp = make_cc_sp(model_curvature=KAPPA)
+    cs = make_cs(v_ego=V, yaw_rate=yaw_for(KAPPA * 0.90))
+    a = plain.update(cc, cc_sp, cs, make_actuators(curvature=KAPPA))
+    b = comp.update(cc, cc_sp, cs, make_actuators(curvature=KAPPA))
+    self.assertGreater(abs(b.path_angle), abs(a.path_angle))
+    self.assertAlmostEqual(plain.shadow_curvature, comp.shadow_curvature, places=9)
+
+  def test_does_nothing_when_disabled(self):
+    on = drive(angle_ctrl(delivery_compensation=True), 300, KAPPA, KAPPA * 0.90)
+    off = drive(angle_ctrl(delivery_compensation=False), 300, KAPPA, KAPPA * 0.90)
+    self.assertGreater(on.delivery_comp, 1.05)
+    # the correction is still tracked when disabled; it just must not reach the gain
+    cc = make_cc(lat_active=True, curvature=KAPPA)
+    cc_sp = make_cc_sp(model_curvature=KAPPA)
+    cs = make_cs(v_ego=V, yaw_rate=yaw_for(KAPPA * 0.90))
+    self.assertAlmostEqual(
+      off.update(cc, cc_sp, cs, make_actuators(curvature=KAPPA)).path_angle,
+      drive(angle_ctrl(), 300, KAPPA, KAPPA * 0.90).update(
+        cc, cc_sp, cs, make_actuators(curvature=KAPPA)).path_angle, places=9)

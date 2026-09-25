@@ -24,7 +24,6 @@ executes the commanded angle directly, with no filter state to unwind.
 Background: https://bluepilot.dev/announcements/
 """
 from collections import deque
-from math import exp
 
 from numpy import clip, interp
 
@@ -33,7 +32,6 @@ from opendbc.car.ford.values import CarControllerParams
 from opendbc.sunnypilot.car.ford.human_turn import HumanTurnDetector
 from opendbc.sunnypilot.car.ford.lateral_common import INACTIVE_RESULT, FordLateralResult, get_current_curvature
 from opendbc.sunnypilot.car.ford.values_ext import (
-  ANGLE_CURVATURE_ERROR,
   FORD_DBC_PATH_ANGLE_MAX,
   FORD_DBC_PATH_ANGLE_MIN,
   HIGH_SPEED_DAMPENING_RANGE,
@@ -116,11 +114,10 @@ _DBC_SAT_FRACTION = 0.90          # fraction of the DBC limit that counts as sat
 #
 # The ratio is measured against the *requested* curvature, before the deviation clip, not against
 # the clipped kappa_cmd that goes out as path_angle. That is deliberate and it is not what the
-# handoff suggested. The clip pins kappa_cmd at measured + ANGLE_CURVATURE_ERROR whenever the
-# command leads the car, which puts an algebraic floor of m / (m + 0.004) under any post-clip
-# ratio: 0.71 at a 100 m radius, 0.83 at 50 m. Against a 0.75 threshold a post-clip observer
-# cannot tell attenuation from the clip's own floor at exactly the curvatures where the PSCM
-# attenuates. Requested-vs-delivered asks the question that
+# handoff suggested. The clip pins kappa_cmd at measured + CURVATURE_ERROR whenever the command
+# leads the car, which puts an algebraic floor of m / (m + 0.002) under any post-clip ratio: 0.83
+# at a 100 m radius, 0.91 at 50 m. A post-clip observer therefore cannot see attenuation at
+# exactly the curvatures where the PSCM attenuates. Requested-vs-delivered asks the question that
 # matters anyway -- how much of what the planner wanted did the truck actually do -- and it counts
 # the clip's own throttling, which the saturation handling should respond to for the same reason.
 _SAT_OBS_LAG_S = 0.031            # s, measured actuator lag the comparison aligns to
@@ -140,81 +137,30 @@ _SAT_OBS_MAX_HOLD_S = 10.0        # hard release; longer than any real corner, s
 _SAT_OBS_REFRACTORY_S = 1.0       # after a hard release, before it may arm again
 _SAT_OBS_RATIO_NEUTRAL = 1.0      # what the filter holds while gated, i.e. "delivering fine"
 
-# Adaptive steering gain: a closed loop on delivered-vs-commanded curvature.
+# Closed-loop correction on the shortfall the observer measures.
 #
 # path_angle = kappa * v * gain is open loop: nothing anywhere checks whether the module
-# actually produced the curvature that was asked of it, and on this truck the answer moves. Fit
-# against the path_angle actually transmitted (hands-off, above 9 m/s, 4 routes), the plant
-# delivers 0.61 to 1.28 of path_angle / v depending on the drive, and about 0.70 at 5-9 m/s
-# against 0.85 at 9-13 m/s. No fixed gain is right for all of that, which is why raising the
-# speed factors helps in hard corners and overdoes it elsewhere.
+# actually produced the curvature that was asked of it. On this truck it does not. System ID
+# over four logs, hands-off segments only, lag aligned, gives delivered/commanded = 0.874
+# (R2 0.94-0.97 per log, 0.851 at gentle curvature and 0.906 at moderate). That shortfall is
+# uncorrected, so the truck runs wide and the driver adds the rest.
 #
-# So the gain is corrected live, both ways, toward whatever makes delivered equal commanded.
+# delivery_ratio above is already the lag-aligned, low-passed measurement of exactly that, so
+# this scales the gain by its reciprocal.
 #
-# The target is the gain that was applied when the measured frame was commanded, divided by the
-# delivery ratio it produced: G_then / (delivered / commanded). A linear plant k gives
-# ratio = k * G_then, so the target is 1 / k in one step. The earlier version targeted
-# 1 / ratio, which ignores the gain already in the loop and settles at 1 / sqrt(k): about half
-# the correction it was built to make.
+# It only ever adds. Under-delivery is the failure mode, and cutting the command when the
+# ratio reads high would hand a measurement artifact, a cambered road or a driver nudge, the
+# authority to steer less in a curve. The cap is what a 0.80 ratio needs; anything below that
+# is a broken measurement rather than a gain to chase, and is ignored rather than extrapolated.
 #
-# Error-scaled rate, not an error-scaled gain. The gain itself is never pushed past what the
-# measurement says is correct; that would overshoot every time. What scales with the error is
-# how fast it moves there: the time constant falls exponentially with the lag-aligned curvature
-# error, from _ADAPT_TAU_SLOW_S when the car is nearly on the request down to _ADAPT_TAU_FAST_S
-# when it is far off. Curvature error is the right domain because it maps one-to-one to steering
-# wheel angle at any speed; _ADAPT_ERR_SCALE of 0.005 1/m is roughly 18 degrees at the wheel.
-#
-# The plant is identified against kappa_cmd, the curvature the gain actually multiplied, not
-# against the request. Above 9 m/s the deviation clip holds kappa_cmd within 0.004 1/m of the
-# measurement, so whenever the car is behind (an S-bend reversal, the clip's own steady-state
-# trap) the request-based ratio measures the clip and reads as a shortfall of 2x or more; chasing
-# it pushed the loop gain past 1, where the same clip turns into a latch: the car over-delivers,
-# the command follows the measurement up by up to 0.004, and the car over-delivers on that, all
-# the way to the DBC limit. That latch exists with this loop off, too, whenever k * G > 1, which
-# is what raising the speed factors does; it is the "too much" half of that trade. Against
-# kappa_cmd the estimate is the plant and nothing else. The request still sets how fast it
-# moves: that is the error the driver sees, and the plant inverse is exactly what lets the car
-# escape the clip.
-#
-# Learning only happens on frames that measure the gain and nothing else:
-#   * hands-free, above the speed and curvature floors, same sign (the observer's own gates)
-#   * kappa_cmd has held steady over the last _ADAPT_STEADY_S. The plant takes about 0.25 s to
-#     answer (path_angle fit: 0.1 s response behind a 0.15 s delay), so a changing command reads
-#     as a gain error that is really lag. One exception: a cut is allowed while the command grows
-#     if the car is ahead of it, because that is the clip latch above and not lag.
-#   * path_angle went out exactly as the gain asked for that same window: no saturation hold, no
-#     DBC clip and no rate limit. When anything else shaped the output, the ratio measures that.
-#   * a target implausibly far past the ceiling is a stalled or saturated module, not a gain,
-#     and freezes the loop instead of pegging it.
-#
-# The gain in the estimate is the one applied _ADAPT_LAG_S ago, the plant's own response time,
-# so a correction still walking in is not credited with a response it has not produced yet.
-#
-# The measurement is de-biased first. Every logged drive shows the same yaw-rate offset on
-# straight road, -0.0047 rad/s (-0.27 deg/s, 12 logs, 25k samples), which is a sensor bias, not
-# the truck: in curvature units it is bias / v, so at 7 m/s against the 0.004 floor it is a 17%
-# error, opposite in left and right turns, and the loop would learn it as a gain. It is
-# estimated online on straight, hands-free road above _YAW_BIAS_MIN_SPEED and subtracted here
-# only. The deviation clip and the panda keep the raw yaw rate, because they must agree.
-#
-# Whenever it cannot measure, it drifts back to neutral slowly, so what one corner learned still
-# helps the next one but does not outlive the conditions it was learned in.
-_ADAPT_GAIN_MIN = 0.65            # floor: cancels a 1.5 speed factor on a 1.0 plant
-_ADAPT_GAIN_MAX = 1.50            # ceiling: covers the 0.61 plant the fit found at its worst
-_ADAPT_TAU_SLOW_S = 1.5           # time constant with the car on the request
-_ADAPT_TAU_FAST_S = 0.30          # and far off it; never faster than the plant's own response
-_ADAPT_ERR_SCALE = 0.005          # 1/m of error per e-fold of speed-up
-_ADAPT_LAG_S = 0.25               # s, plant response the applied gain is aligned to
-_ADAPT_STEADY_S = 0.40            # s, command steady and output unconstrained before learning
-_ADAPT_STEADY_EPS = 5e-4          # 1/m of change over that window that still counts as steady
-_ADAPT_IMPLAUSIBLE = 1.5          # target past ceiling * this is a stall, not a gain: hold
-_ADAPT_DECAY_TAU_S = 6.0          # drift back to 1.0 while nothing is measurable
-_ADAPT_LAG_FRAMES = round(_ADAPT_LAG_S / _STEER_DT)
-_ADAPT_STEADY_FRAMES = round(_ADAPT_STEADY_S / _STEER_DT)
-_YAW_BIAS_TAU_S = 20.0            # s, a sensor property: slow and never reset
-_YAW_BIAS_MIN_SPEED = 15.0        # m/s, where lane keeping is small against the bias
-_YAW_BIAS_STRAIGHT = 2e-4         # 1/m, request this close to zero counts as straight
-_YAW_BIAS_LIMIT = 0.02            # rad/s, anything bigger is not a bias
+# Its own time constant is far slower than the ratio filter's, so the correction walks in over
+# a couple of seconds instead of tracking the ratio's own movement through a corner, and it
+# decays back to neutral slower still whenever the measurement stops being trustworthy, which
+# is every driver touch, lane change and stall blip.
+_DELIVERY_COMP_MAX = 1.25         # ceiling on the boost
+_DELIVERY_COMP_MIN_RATIO = 0.80   # below this the measurement is suspect, not a target
+_DELIVERY_COMP_TAU_S = 2.0        # rise
+_DELIVERY_COMP_DECAY_TAU_S = 4.0  # fall back to 1.0 when the measurement is gated
 _SAT_OBS_RATIO_MAX = 2.0          # clamp, so one bad frame cannot drag the filter far
 # The lag is finer than the 50 ms lateral tick, so the aligned request is interpolated between
 # the two bracketing frames rather than rounded to one of them. Rounding 31 ms to a whole frame
@@ -226,17 +172,8 @@ _SAT_OBS_HIST_LEN = _SAT_OBS_LAG_IDX + 2
 
 # Soft rate-of-change limit on path_angle, per lateral call (20 Hz). Deliberately slightly
 # tighter than the panda mirror in safety/modes/ford.h so openpilot never provokes a block.
-#
-# Sized from the lateral jerk it admits rather than tuned by feel: path_angle = kappa * v * G, so
-# d(path_angle)/dt = J * G / v, where J is lateral jerk. clip_curvature already bounds J (5 m/s^3
-# by default, up to 12 when FordLateralJerkLimit is raised), so this limit exists only to catch a
-# runaway command and must sit above that bound, not below it. The nodes follow 0.9 / v rad/call,
-# i.e. J * G = 18 m/s^3: the largest jerk limit (12) times a typical schedule gain (1.5). The old
-# table allowed about 3.9 m/s^3 at 25 m/s, which clipped commands clip_curvature had already
-# passed and was the highway S-bend lag. Linear interpolation between the nodes stays above
-# 0.9 / v (the chord of a convex curve), so the jerk bound is met everywhere, not just at nodes.
-_SOFT_ROC_SPEED_BP = [10.0, 18.0, 35.0]           # m/s
-_SOFT_ROC_V = [0.090, 0.050, 0.0257]              # rad/call
+_SOFT_ROC_SPEED_BP = [9.0, 10.0, 15.0, 25.0]      # m/s
+_SOFT_ROC_V = [0.055, 0.055, 0.0425, 0.009]       # rad/call
 
 # Exit-biased blend: near the DBC limit, or while the planner is actively unwinding, drop the
 # model's weight so the planner's unwind dominates instead of being diluted by a prediction that
@@ -246,14 +183,10 @@ _EXIT_DESIRED_FALLING = 0.010     # (1/m) per call; below this a falling command
 
 # Post-override stall blip. After a driver-touch episode the PSCM can keep reporting InProgress
 # while honoring path_angle at only ~0.56x (healthy hands-free delivery is ~0.95). The
-# deviation clip below then pins kappa_cmd at measured + ANGLE_CURVATURE_ERROR, so the command can
-# never lead the car enough to overcome the attenuation -- a stall the driver reads as "not
-# engaging".
+# deviation clip below then pins kappa_cmd at measured + CURVATURE_ERROR, so the command can never
+# lead the car enough to overcome the attenuation -- a stall the driver reads as "not engaging".
 # A short mode-0 pulse (the same panda-clean wire pattern the human-turn override sends) resets
 # the PSCM's authority, after which path_angle ramps back in from zero through the soft ROC.
-# The trigger is how far the car is behind the planner, in absolute terms, and stays at the 0.004
-# 1/m it was validated at. It was written as twice the stock band; following the angle band to
-# 0.008 would have halved the detector's sensitivity for a reason unrelated to stalls.
 _STALL_GAP_MIN = 2.0 * CarControllerParams.CURVATURE_ERROR
 _STALL_HOLD_S = 0.5               # accumulated clip-binding time before a pulse fires
 _STALL_BLIP_FRAMES = 6            # 6 frames @ 20 Hz = 300 ms; the PSCM acked mode 0 in ~150 ms
@@ -264,19 +197,6 @@ _STALL_MAX_BLIPS = 3              # give up on a stuck episode rather than pulsi
 # sustained press resets the PSCM while the car is still straight and the command small.
 _PRESS_BLIP_MIN_S = 0.5
 _BLIP_MAX_PATH_ANGLE = 0.10       # rad -- the pulse releases steering for 300 ms; never in a curve
-# The stall pulse may also fire when the truck itself is barely turning, whatever the command
-# says. A small command was only ever a proxy for "not in a curve", and during a stall the command
-# is by definition not what the car is doing: it is pinned at measured + ANGLE_CURVATURE_ERROR,
-# i.e. 0.004 * v * G, which crosses 0.10 rad above about 26 m/s with the car dead straight. The
-# yaw rate is the same allowance measured on the truck (path_angle ~ kappa * v at a gain near 1),
-# so a total stall on the highway still gets its reset, and a real curve still blocks it.
-_BLIP_MAX_YAW_RATE = 0.10         # rad/s
-
-def adapt_time_constant(error: float) -> float:
-  """How fast the adaptive gain walks toward its target, given how far the car is off the
-  request (1/m). Exponentially faster with the error, never faster than the plant answers."""
-  return max(_ADAPT_TAU_FAST_S, _ADAPT_TAU_SLOW_S * exp(-error / _ADAPT_ERR_SCALE))
-
 
 def _tuned(value: float, spec: tuple[float, float, float]) -> float:
   """Clamp a user tuning factor, falling back to the default when unset.
@@ -336,16 +256,11 @@ class LateralAngleExt:
     # Delivered-vs-commanded saturation observer. Default off: this is live steering code and the
     # thresholds below are road-validated on one truck, not derived from the firmware.
     self.sat_observer_enabled = bool(tuning.satObserver)
-    # Adaptive steering gain. Separate toggle: the observer is a detector and can run on its own,
-    # this closes a loop around live steering.
+    # Acting on that measurement rather than only flagging it. Separate toggle: the observer is
+    # a detector and can run on its own, this closes a loop around live steering.
     self.delivery_comp_enabled = bool(tuning.deliveryCompensation)
     self.delivery_comp = 1.0
-    self.comp_applied = 1.0
-    self.output_constrained = False
-    # (kappa_req, kappa_cmd, correction applied) per frame, newest last
-    self.adapt_history: deque[tuple[float, float, float]] = deque(maxlen=_ADAPT_STEADY_FRAMES + 1)
-    self.frames_unconstrained = 0
-    self.yaw_bias = 0.0
+    self.delivery_measured = False
     self.kappa_req_history: deque[float] = deque(maxlen=_SAT_OBS_HIST_LEN)
     self.kappa_req_last = 0.0
     self.delivery_ratio = _SAT_OBS_RATIO_NEUTRAL
@@ -380,6 +295,7 @@ class LateralAngleExt:
     if (CS.out.steeringPressed or self.human_turn_active or self.lane_change
         or self.stall_blip_active or v_ego < _SAT_OBS_MIN_SPEED):
       self._clear_saturation_observer()
+      self._update_delivery_compensation()
       return
 
     rising = abs(kappa_req) > abs(self.kappa_req_last) + _SAT_OBS_RISING_EPS
@@ -387,6 +303,7 @@ class LateralAngleExt:
 
     self.kappa_req_history.append(kappa_req)
     if len(self.kappa_req_history) < self.kappa_req_history.maxlen:
+      self._update_delivery_compensation()
       return
 
     # Delay-aligned: what the car is doing now against what was asked for one actuator lag ago.
@@ -427,72 +344,23 @@ class LateralAngleExt:
       self.pscm_attenuating = True
       self.sat_obs_hold_s = 0.0
 
-  def _relax_adaptive_gain(self) -> None:
-    """Nothing to measure: drift back toward neutral, slowly enough that what one corner learned
-    still helps the next."""
-    alpha = _STEER_DT / (_ADAPT_DECAY_TAU_S + _STEER_DT)
-    self.delivery_comp += alpha * (1.0 - self.delivery_comp)
+    self._update_delivery_compensation()
 
-  def _clear_adaptive_gain_history(self) -> None:
-    self.adapt_history.clear()
-    self.frames_unconstrained = 0
+  def _update_delivery_compensation(self) -> None:
+    """Walk the gain correction toward whatever cancels the measured shortfall.
 
-  def _update_adaptive_gain(self, CS, v_ego: float, kappa_req: float, kappa_cmd: float) -> None:
-    """Walk the gain correction toward the one that makes delivered equal commanded.
-
-    Runs every active frame whether or not the toggle is on, and reaches path_angle only through
-    comp_applied, which the toggle gates. It moves toward the measured plant inverse while a
-    clean measurement is available, back toward neutral whenever there is none, and not at all
-    while the frame could only mislead it. Only path_angle scales:
-    shadow_curvature, which is what the panda deviation-checks, is kappa_cmd and is not touched,
-    so a correction in either direction moves the measured curvature toward the shadow.
+    Called from every exit of the observer, including the gated ones, so the correction always
+    moves: toward the reciprocal of the ratio while the measurement is live, and back toward
+    neutral whenever it is not. Raising the gain raises path_angle only. shadow_curvature, which
+    is what the panda deviation-checks, is kappa_cmd and is not touched, so a bigger correction
+    moves the measured curvature toward the shadow rather than away from it.
     """
-    # The observer's gates, for the observer's reasons: each of these moves the measurement
-    # independently of the command, or drops the mode.
-    if (CS.out.steeringPressed or self.human_turn_active or self.lane_change
-        or self.stall_blip_active or v_ego < _SAT_OBS_MIN_SPEED):
-      self._clear_adaptive_gain_history()
-      self._relax_adaptive_gain()
-      return
-
-    # Straight road averages zero yaw, so what the sensor reads there is its own offset.
-    if v_ego > _YAW_BIAS_MIN_SPEED and abs(kappa_req) < _YAW_BIAS_STRAIGHT:
-      alpha = _STEER_DT / (_YAW_BIAS_TAU_S + _STEER_DT)
-      self.yaw_bias = float(clip(self.yaw_bias + alpha * (CS.out.yawRate - self.yaw_bias),
-                                 -_YAW_BIAS_LIMIT, _YAW_BIAS_LIMIT))
-
-    self.frames_unconstrained = 0 if self.output_constrained else self.frames_unconstrained + 1
-    self.adapt_history.append((kappa_req, kappa_cmd, self.comp_applied))
-    if len(self.adapt_history) < self.adapt_history.maxlen:
-      self._relax_adaptive_gain()
-      return
-
-    kappa_req_then, kappa_cmd_then, comp_then = self.adapt_history[-1 - _ADAPT_LAG_FRAMES]
-    # get_current_curvature's convention, without the sensor's offset
-    kappa_now = -(CS.out.yawRate - self.yaw_bias) / max(v_ego, 0.1)
-    if abs(kappa_cmd_then) < _SAT_OBS_MIN_KAPPA or kappa_cmd_then * kappa_now <= 0.0:
-      # a straight, or the car going the other way: not a gain measurement
-      self._relax_adaptive_gain()
-      return
-
-    target = comp_then * kappa_cmd_then / kappa_now
-    if target > _ADAPT_GAIN_MAX * _ADAPT_IMPLAUSIBLE:
-      return  # stalled or saturated: no gain the loop may supply fixes this
-    if self.frames_unconstrained < _ADAPT_STEADY_FRAMES:
-      return  # something other than the gain shaped the output
-    window = [abs(h[1]) for h in self.adapt_history]
-    if max(window) - abs(kappa_cmd) > _ADAPT_STEADY_EPS:
-      return  # shrinking: lag reads as an error either way, depending on how slow the plant is
-    if abs(kappa_cmd) - min(window) > _ADAPT_STEADY_EPS:
-      # Growing. Normally that is curve entry with the car behind, and any reading is lag. The
-      # one exception is the car *ahead* of the command it is being given: that is the deviation
-      # clip latch, the measurement dragging the command up behind it, and a cut is exactly
-      # what ends it. Nothing else is learned here.
-      if not (target < self.delivery_comp and abs(kappa_now) > abs(kappa_cmd)):
-        return
-
-    target = float(clip(target, _ADAPT_GAIN_MIN, _ADAPT_GAIN_MAX))
-    tau = adapt_time_constant(abs(kappa_req_then - kappa_now))
+    if self.delivery_measured and self.delivery_ratio >= _DELIVERY_COMP_MIN_RATIO:
+      target = float(clip(1.0 / self.delivery_ratio, 1.0, _DELIVERY_COMP_MAX))
+      tau = _DELIVERY_COMP_TAU_S
+    else:
+      target = 1.0
+      tau = _DELIVERY_COMP_DECAY_TAU_S
     alpha = _STEER_DT / (tau + _STEER_DT)
     self.delivery_comp += alpha * (target - self.delivery_comp)
 
@@ -502,7 +370,6 @@ class LateralAngleExt:
     self.path_angle_last = 0.0
     self.curvature_deviation_limited = False
     self._clear_saturation_observer()
-    self._clear_adaptive_gain_history()
     # Lane_Assist_Data1 carries the shadow at 33 Hz whenever angle mode is configured, and the
     # panda latches it from every such frame regardless of whether lateral is active. Parking it
     # at a stale zero would make the first enabled LMC frame after re-engage race that latch
@@ -611,20 +478,19 @@ class LateralAngleExt:
         precision = 0
 
     # *** deviation clip ***
-    # Clip to measured curvature +- ANGLE_CURVATURE_ERROR, the same kind of clip the stock
-    # curvature path applies, at the wider band the panda allows in angle mode (see values_ext).
-    # Without it kappa_cmd -- and therefore path_angle, and the shadow curvature the panda
-    # checks -- can legitimately lead the measurement by more than the safety tolerance during
-    # ordinary curve entry, and the deviation check would block routinely rather than only on a
-    # genuine divergence. Clipping the steering intent itself, not just the reported value, is
-    # what keeps that check meaningful.
+    # Clip to measured curvature +- CURVATURE_ERROR, the same clip the stock curvature path
+    # applies. Without it kappa_cmd -- and therefore path_angle, and the shadow curvature the
+    # panda checks -- can legitimately lead the measurement by more than the safety tolerance
+    # during ordinary curve entry, and the deviation check would block routinely rather than only
+    # on a genuine divergence. Clipping the steering intent itself, not just the reported value,
+    # is what keeps that check meaningful.
     kappa_cmd = float(requested_curvature)
     current_curvature = get_current_curvature(CS)
     self.curvature_deviation_limited = False
     if v_ego > 9:
       kappa_pre_clip = kappa_cmd
-      kappa_cmd = float(clip(kappa_cmd, current_curvature - ANGLE_CURVATURE_ERROR,
-                             current_curvature + ANGLE_CURVATURE_ERROR))
+      kappa_cmd = float(clip(kappa_cmd, current_curvature - CarControllerParams.CURVATURE_ERROR,
+                             current_curvature + CarControllerParams.CURVATURE_ERROR))
       self.curvature_deviation_limited = abs(kappa_cmd - kappa_pre_clip) > 1e-9
 
     # No curvature clamp here, deliberately. CURVATURE_MAX is the range of the c2 signal, and angle
@@ -644,11 +510,11 @@ class LateralAngleExt:
                               self.path_angle_gain_high_curv * self.high_speed_factor]))
     # Bigger curves need a little more signal to avoid understeer.
     gain = float(interp(abs(kappa_cmd), _GAIN_CURV_BP, [low_gain, high_gain]))
-    # Adaptive gain. Computed at the end of the previous frame, so it is one 20 Hz tick old,
-    # which against a time constant of 0.3 s or more does not matter.
-    self.comp_applied = self.delivery_comp if self.delivery_comp_enabled else 1.0
-    path_angle = kappa_cmd * v_ego * gain * self.comp_applied
-    path_angle_asked = path_angle
+    # Cancel the measured delivery shortfall. Computed at the end of the previous frame, so it
+    # is one 20 Hz tick old, which against a 2 s time constant does not matter.
+    if self.delivery_comp_enabled:
+      gain *= self.delivery_comp
+    path_angle = kappa_cmd * v_ego * gain
 
     # *** saturation handling ***
     if saturated:
@@ -665,9 +531,6 @@ class LateralAngleExt:
     soft_roc = float(interp(v_ego, _SOFT_ROC_SPEED_BP, _SOFT_ROC_V))
     path_angle = float(clip(path_angle, self.path_angle_last - soft_roc, self.path_angle_last + soft_roc))
     self.path_angle_last = path_angle
-    # Did anything but the gain decide this frame's output? The adaptive gain must not learn
-    # from frames where it did.
-    self.output_constrained = abs(path_angle - path_angle_asked) > 1e-9
 
     # While the driver is pressing but the human-turn override has not latched yet, the clipped
     # planner kappa cannot keep up with the wheel: the driver moves the measurement faster than
@@ -676,7 +539,6 @@ class LateralAngleExt:
     self.shadow_curvature = current_curvature if CS.out.steeringPressed else kappa_cmd
 
     self._update_saturation_observer(CS, v_ego, float(requested_curvature))
-    self._update_adaptive_gain(CS, v_ego, float(requested_curvature), kappa_cmd)
     self._update_stall_detection(CS, desired_curvature, current_curvature)
 
     return FordLateralResult(
@@ -708,10 +570,8 @@ class LateralAngleExt:
     if stalled:
       if self.curvature_deviation_limited and self.stall_blip_cooldown_s <= 0.0:
         self.stall_blip_hold_s += _STEER_DT
-      not_in_a_curve = (abs(self.path_angle_last) < _BLIP_MAX_PATH_ANGLE
-                        or abs(current_curvature) * CS.out.vEgoRaw < _BLIP_MAX_YAW_RATE)
       if (self.stall_blip_hold_s >= _STALL_HOLD_S and self.stall_blip_count < _STALL_MAX_BLIPS
-          and not_in_a_curve):
+          and abs(self.path_angle_last) < _BLIP_MAX_PATH_ANGLE):
         self.stall_blip_frames_left = _STALL_BLIP_FRAMES
         self.stall_blip_hold_s = 0.0
         self.stall_blip_count += 1
