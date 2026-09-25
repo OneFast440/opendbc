@@ -175,45 +175,6 @@ PSCM_LIM_STAT_UNRELIABLE_CANFD = True
 # User-tunable values. (default, min, max) -- the single source of truth for the defaults and
 # clamps used by the settings UI, the sunnylink schema, and the control code.
 # angle mode
-# Accelerator pedal position, percent, above which the driver counts as overriding.
-#
-# CarState sets gasPressed from ApedPos_Pc_ActlArb > 1e-6, so the lightest imaginable touch
-# reads as a full override and the whole ACCDATA goes inactive. If the driver is asking for
-# less than cruise already was, the truck then slows down under a pedal they just put their
-# foot on, which is the opposite of what touching the accelerator is for.
-#
-# Measured over six of the owner's drives, a deliberate press sits at 7-31% with a 16% median
-# and only 0.1% of pressed frames below 2%, so a threshold in this range costs nothing on a
-# real press and only filters the feather.
-#
-# It is a tuning value rather than a constant because how far it can be raised is a question
-# about the PCM, not about the pedal. Staying active at a percent or two of pedal is the same
-# thing as the normal cruising state. Staying active at ten is openpilot commanding propulsion
-# while the driver is also asking for some, which is the arrangement that was denied when
-# engaging with the pedal already down. Whether it is also denied once already engaged is
-# untested, and raising this is how to find out.
-PEDAL_OVERRIDE_RANGE = (2.0, 0.0, 25.0)   # default, min, max
-
-# What the driver is asking for, in m/s^2, from accelerator pedal position and speed.
-#
-# The override is meant to hand over when the driver asks for more than openpilot already
-# is, and that comparison needs both sides in the same units. Pedal position is not an
-# acceleration, so it is measured: grade corrected, brakes off, above 7 mph, over eleven of
-# the owner's drives, 29718 samples. Medians per cell, which are monotonic in pedal and fall
-# with speed as the same pedal buys less acceleration.
-#
-# Only used to decide who is in control, never to command anything, so being a little off
-# costs a handover at a slightly wrong pedal position and nothing more. It errs toward
-# handing over: the rows read a given pedal as asking for slightly more than the median cell
-# did, so a driver on the edge gets control rather than openpilot keeping it.
-PEDAL_ACCEL_BP = (0.0, 3.0, 5.0, 7.5, 11.0, 15.5, 21.5, 32.0)        # percent
-PEDAL_ACCEL_SPEED_BP = (7.2, 15.6, 24.6)                             # m/s, the band centres
-PEDAL_ACCEL_V = (
-  (-0.21, -0.14, -0.02, 0.22, 0.48, 0.93, 1.31, 2.17),               # ~16 mph
-  (-0.27, -0.14, -0.06, -0.06, 0.06, 0.47, 0.97, 2.11),              # ~35 mph
-  (-0.29, -0.14, -0.09, -0.07, 0.09, 0.23, 0.77, 1.62),              # ~55 mph
-)
-
 LOW_SPEED_FACTOR_RANGE = (1.0, 0.5, 1.5)
 HIGH_SPEED_FACTOR_RANGE = (1.0, 0.5, 1.5)
 HIGH_SPEED_DAMPENING_RANGE = (1.0, 0.25, 1.25)

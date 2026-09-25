@@ -26,7 +26,6 @@ from opendbc.sunnypilot.car.ford.values_ext import (
   LANE_CHANGE_FACTOR_RANGE,
   LANE_POSITIONING_GAIN_RANGE,
   LOW_SPEED_FACTOR_RANGE,
-  PEDAL_OVERRIDE_RANGE,
   PATH_OFFSET_RANGE,
   PrimaryLateralControl,
 )
@@ -235,8 +234,6 @@ def _initialize_ford(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_d
 
   CP_SP.fordLongitudinalTuning.followControl = _bool_param(params_dict, "FordFollowControl", True)
   CP_SP.fordLongitudinalTuning.downhillCompensation = _bool_param(params_dict, "FordDownhillCompensation", True)
-  CP_SP.fordLongitudinalTuning.pedalOverrideThreshold = _clamp_tuning(
-    params_dict.get("FordPedalOverrideThreshold"), PEDAL_OVERRIDE_RANGE)
 
   CP_SP.fordHud.handsFreeClusterMsg = _bool_param(params_dict, "FordHandsFreeClusterMsg")
   CP_SP.fordHud.driverMonitorCanMsg = _bool_param(params_dict, "FordDriverMonitorCanMsg")

@@ -91,7 +91,6 @@ class CarParamsSP:
   class FordLongitudinalTuning:
     followControl: bool = auto_field()
     downhillCompensation: bool = auto_field()
-    pedalOverrideThreshold: float = auto_field()
 
   @auto_dataclass
   class FordHud:

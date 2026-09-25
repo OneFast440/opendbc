@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from opendbc.car import structs
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.ford.values import CAR
-from opendbc.sunnypilot.car.ford.values_ext import PEDAL_OVERRIDE_RANGE, T_IDXS, PrimaryLateralControl
+from opendbc.sunnypilot.car.ford.values_ext import T_IDXS, PrimaryLateralControl
 
 SendButtonState = structs.IntelligentCruiseButtonManagement.SendButtonState
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -82,20 +82,15 @@ def make_cc_sp(model_curvature=0.0, lateral_delay=0.12, lane_change_state=0, lan
 
 
 def make_cs(v_ego=30.0, yaw_rate=0.0, steering_pressed=False, steering_angle=0.0,
-            gas_pressed=False, brake_pressed=False, standstill=False, main_on=True,
-            pedal_pc=None, set_speed=0.0):
-  # a press with no position given is a real one, well past any sane override threshold
-  if pedal_pc is None:
-    pedal_pc = 20.0 if gas_pressed else 0.0
+            gas_pressed=False, brake_pressed=False, standstill=False, main_on=True):
   out = SimpleNamespace(
     vEgoRaw=v_ego, vEgo=v_ego, yawRate=yaw_rate,
     steeringPressed=steering_pressed, steeringAngleDeg=steering_angle,
     gasPressed=gas_pressed, brakePressed=brake_pressed,
-    cruiseState=SimpleNamespace(available=main_on, standstill=standstill, speed=set_speed),
+    cruiseState=SimpleNamespace(available=main_on, standstill=standstill),
   )
   return SimpleNamespace(
     out=out,
-    accelerator_pedal_pc=pedal_pc,
     buttons_stock_values=defaultdict(int),
     acc_tja_status_stock_values=defaultdict(int),
     lkas_status_stock_values=defaultdict(int),
@@ -137,8 +132,6 @@ def make_car_params(platform=CAR.FORD_F_150_MK14, mode=PrimaryLateralControl.sto
 
   CP_SP.fordLongitudinalTuning.followControl = tuning.get('follow_control', True)
   CP_SP.fordLongitudinalTuning.downhillCompensation = tuning.get('downhill_compensation', True)
-  CP_SP.fordLongitudinalTuning.pedalOverrideThreshold = tuning.get('pedal_override_threshold',
-                                                                 PEDAL_OVERRIDE_RANGE[0])
   CP_SP.fordHud.handsFreeClusterMsg = tuning.get('hands_free_cluster', False)
   CP_SP.fordHud.driverMonitorCanMsg = tuning.get('driver_monitor_cluster', False)
   return CP, CP_SP

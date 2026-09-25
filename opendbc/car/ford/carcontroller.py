@@ -203,9 +203,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     accel = float(np.clip(accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
     gas = float(np.clip(gas, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
 
-    # Both gas and accel are in m/s^2, accel is used solely for braking. sunnypilot: the
-    # substitution of INACTIVE_GAS below MIN_GAS happens in the extension instead of here, so
-    # the follow limits and the brake decision see the real request rather than the sentinel.
+    # Both gas and accel are in m/s^2, accel is used solely for braking
+    if not CC.longActive or gas < CarControllerParams.MIN_GAS:
+      gas = CarControllerParams.INACTIVE_GAS
 
     # PCM applies pitch compensation to gas/accel, but we need to compensate for the brake/pre-charge bits
     accel_due_to_pitch = 0.0
@@ -221,8 +221,6 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     stopping = actuators.longControlState == LongCtrlState.stopping
     # TODO: look into using the actuators packet to send the desired speed
-    # sunnypilot: not CC.longActive. The extension clears it while the driver is on the
-    # accelerator, because the PCM denies an active request during its own override state.
-    return fordcan.create_acc_msg(self.packer, self.CAN, lng.acc_enabled, lng.gas, lng.accel, stopping,
+    return fordcan.create_acc_msg(self.packer, self.CAN, CC.longActive, lng.gas, lng.accel, stopping,
                                   lng.brake_actuate, v_ego_kph=V_CRUISE_MAX,
                                   precharge_request=lng.precharge_actuate, accel_pred=lng.accel_pred)

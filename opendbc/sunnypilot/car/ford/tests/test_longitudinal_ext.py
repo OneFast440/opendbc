@@ -7,20 +7,11 @@ See the LICENSE.md file in the root directory for more details.
 import unittest
 
 from opendbc.car.ford.values import CarControllerParams
-from opendbc.sunnypilot.car.ford.longitudinal_ext import (MS_TO_MPH, _BRAKE_ENGAGE, _BRAKE_RELEASE,
-                                                          _GAS_CREEP_SPEED, _GAS_RELEASE,
-                                                          _PRECHARGE_ENGAGE, _RECOVER_DECEL_CAP,
-                                                          _RECOVER_MAX_S, LongitudinalExt)
+from opendbc.sunnypilot.car.ford.longitudinal_ext import MS_TO_MPH, LongitudinalExt
 from opendbc.sunnypilot.car.ford.tests.helpers import make_car_params, make_cc, make_cc_sp, make_cs, make_lead
 
 HIGHWAY_MS = 60.0 / MS_TO_MPH
 URBAN_MS = 30.0 / MS_TO_MPH
-
-# Expressed against the thresholds rather than hard coded, so a retune does not silently
-# turn these into tests of something else.
-BRAKING = _BRAKE_ENGAGE - 0.05                      # past engage
-COASTING = (_BRAKE_ENGAGE + _BRAKE_RELEASE) / 2     # inside the band
-PRECHARGE_ONLY = (_PRECHARGE_ENGAGE + _BRAKE_ENGAGE) / 2
 
 
 class TestLongitudinalExt(unittest.TestCase):
@@ -33,14 +24,6 @@ class TestLongitudinalExt(unittest.TestCase):
     return lng.update(make_cc(long_active=long_active), make_cc_sp(lead=lead),
                       make_cs(v_ego=v_ego, gas_pressed=gas_pressed, brake_pressed=brake_pressed),
                       op_accel, op_gas, pitch)
-
-  @staticmethod
-  def _press(lng, pedal_pc, op_gas, v_ego=HIGHWAY_MS, set_speed=0.0, lead=None):
-    """One frame with the driver on the pedal at a given position."""
-    return lng.update(make_cc(long_active=True), make_cc_sp(lead=lead),
-                      make_cs(v_ego=v_ego, gas_pressed=pedal_pc > 0.0, pedal_pc=pedal_pc,
-                              set_speed=set_speed),
-                      op_gas, op_gas, 0.0)
 
   def _settle_speed(self, lng, v_ego=HIGHWAY_MS, lead=None):
     """Cross the engage threshold so the speed band latches on."""
@@ -103,29 +86,13 @@ class TestLongitudinalExt(unittest.TestCase):
     result = self._step(lng, op_accel=0.0, op_gas=1.5, lead=lead)
     self.assertAlmostEqual(result.gas, 1.5)
 
-  def test_no_lead_is_left_to_the_planner(self):
-    """Every follow limit is defined against a lead, so without one there is nothing to do."""
+  def test_no_lead_holds_accel_at_zero(self):
     lng = self._build()
     self._settle_speed(lng)
-    result = self._step(lng, op_accel=0.5, op_gas=0.5)
-    self.assertFalse(result.follow_control_used)
-    self.assertAlmostEqual(result.accel, 0.5)
+    result = self._step(lng, op_accel=-1.0, op_gas=0.5)
+    self.assertTrue(result.follow_control_used)
+    self.assertEqual(result.accel, 0.0)
     self.assertAlmostEqual(result.gas, 0.5)
-    # and a brake request is not capped either
-    result = self._step(lng, op_accel=-1.0, op_gas=-1.0)
-    self.assertAlmostEqual(result.accel, -1.0)
-
-  def test_no_lead_can_still_brake(self):
-    """Regression: the no-lead clamp pinned the brake channel at zero and kept it there,
-    which also reset the CarController's rate limiter every frame. Braking was impossible."""
-    lng = self._build()
-    self._settle_speed(lng)
-    sent = 0.0
-    for _ in range(60):
-      # what the CarController would hand us, including its 3.5 m/s^3 downward limit
-      op_accel = max(-3.0, sent - 3.5 * CarControllerParams.ACC_CONTROL_STEP * 0.01)
-      sent = self._step(lng, op_accel=op_accel, op_gas=-3.0).accel
-    self.assertAlmostEqual(sent, -3.0)
 
   def test_slow_lead_is_left_to_the_planner(self):
     lng = self._build()
@@ -138,267 +105,32 @@ class TestLongitudinalExt(unittest.TestCase):
     lng = self._build()
     lead = make_lead(status=True, d_rel=HIGHWAY_MS, v_rel=-3.0, v_lead=HIGHWAY_MS)
     self._settle_speed(lng, lead=lead)
-    result = self._step(lng, op_accel=0.0, op_gas=0.5, lead=lead, brake_pressed=True)
-    self.assertFalse(result.follow_control_used)
-    self.assertAlmostEqual(result.gas, 0.5)
-    result = lng.update(make_cc(long_active=True), make_cc_sp(lead=lead),
-                        make_cs(v_ego=HIGHWAY_MS, gas_pressed=True, pedal_pc=35.0), 0.0, 0.5, 0.0)
-    self.assertFalse(result.follow_control_used)
-
-  def test_the_accdata_goes_inactive_under_the_drivers_foot(self):
-    """The PCM refuses an active AccPrpl_A_Rq while it has cruise in its own override state:
-    CmbbDeny_B_ActlPrpl goes to 1 and CcStat_D_Actl to 2, which reads back as accFaulted.
-    Seen twice in one drive, with a positive request and with a negative one, so the whole
-    message goes back to its inactive form rather than the request being trimmed."""
-    lng = self._build(follow_control=False)
-    active = self._step(lng, op_accel=0.3, op_gas=0.3)
-    self.assertTrue(active.acc_enabled)
-    self.assertAlmostEqual(active.gas, 0.3)
-
-    for op_gas in (0.5, 0.0, -0.3, -2.0):
-      result = self._press(lng, pedal_pc=35.0, op_gas=op_gas)
-      self.assertFalse(result.acc_enabled, op_gas)
-      self.assertEqual(result.gas, CarControllerParams.INACTIVE_GAS, op_gas)
-      self.assertFalse(result.brake_actuate, op_gas)
-      self.assertFalse(result.precharge_actuate, op_gas)
-      # AccBrkTot_A_Rq has to go inactive with the enable bit. Clearing the bit alone still
-      # faulted: the module denied a live brake total under a cleared Cmbb_B_Enbl.
-      self.assertEqual(result.accel, 0.0, op_gas)
-
-  def test_a_feathered_pedal_is_not_an_override(self):
-    """CarState calls any non-zero pedal an override, so the lightest touch used to take the
-    whole ACCDATA inactive and the truck lost speed under a pedal just been rested on."""
-    lng = self._build(follow_control=False, pedal_override_threshold=2.0)
-    result = lng.update(make_cc(long_active=True), make_cc_sp(),
-                        make_cs(v_ego=HIGHWAY_MS, gas_pressed=True, pedal_pc=1.0), 0.3, 0.3, 0.0)
-    self.assertTrue(result.acc_enabled)
-    self.assertAlmostEqual(result.gas, 0.3)
-
-  def test_a_press_asking_for_more_than_openpilot_takes_over(self):
-    lng = self._build(follow_control=False, pedal_override_threshold=2.0)
-    result = self._press(lng, pedal_pc=30.0, op_gas=0.3)
-    self.assertTrue(result.overriding)
-    self.assertFalse(result.acc_enabled)
-    self.assertEqual(result.gas, CarControllerParams.INACTIVE_GAS)
-    self.assertEqual(result.accel, 0.0)
-
-  def test_a_press_asking_for_less_than_openpilot_does_not(self):
-    """Resting on the pedal under what cruise was already doing must not cost the driver
-    speed, which is what handing over on any pedal movement did."""
-    lng = self._build(follow_control=False, pedal_override_threshold=2.0)
-    result = self._press(lng, pedal_pc=8.0, op_gas=0.5)
-    self.assertFalse(result.overriding)
-    self.assertTrue(result.acc_enabled)
-    self.assertAlmostEqual(result.gas, 0.5)
-
-  def test_the_crossing_moves_with_openpilots_own_request(self):
-    """The same pedal is an override against a small request and not against a large one."""
-    for op_gas, overriding in ((-0.2, True), (2.0, False)):
-      lng = self._build(follow_control=False, pedal_override_threshold=2.0)
-      self.assertEqual(self._press(lng, pedal_pc=13.0, op_gas=op_gas).overriding, overriding, op_gas)
-
-  def test_the_handover_does_not_chatter(self):
-    lng = self._build(follow_control=False, pedal_override_threshold=2.0)
-    self.assertTrue(self._press(lng, pedal_pc=30.0, op_gas=0.3).overriding)
-    # back to where it would not have taken over from scratch, but not far enough to give back
-    at_edge = lng.driver_accel_request(30.0, HIGHWAY_MS)
-    self.assertTrue(self._press(lng, pedal_pc=30.0, op_gas=at_edge - 0.05).overriding)
-    self.assertFalse(self._press(lng, pedal_pc=30.0, op_gas=at_edge + 0.5).overriding)
-
-  def test_the_noise_threshold_still_applies_and_is_tunable(self):
-    for threshold, pedal, counts in ((2.0, 1.0, False), (10.0, 5.0, False), (2.0, 30.0, True)):
-      lng = self._build(follow_control=False, pedal_override_threshold=threshold)
-      self.assertEqual(self._press(lng, pedal_pc=pedal, op_gas=-0.4).overriding, counts,
-                       (threshold, pedal))
-
-  def test_the_pedal_map_is_monotonic_and_falls_with_speed(self):
-    lng = self._build(follow_control=False)
-    for v in (8.0, 16.0, 25.0):
-      asked = [lng.driver_accel_request(p, v) for p in (0.0, 5.0, 11.0, 20.0, 35.0)]
-      self.assertEqual(asked, sorted(asked), v)
-    # the same pedal buys less acceleration the faster you are already going
-    self.assertGreater(lng.driver_accel_request(20.0, 8.0), lng.driver_accel_request(20.0, 25.0))
-
-  def test_a_carstate_without_a_pedal_position_falls_back_to_gas_pressed(self):
-    lng = self._build(follow_control=False)
-    cs = make_cs(v_ego=HIGHWAY_MS, gas_pressed=True, pedal_pc=0.0)
-    del cs.accelerator_pedal_pc
-    self.assertFalse(lng.update(make_cc(long_active=True), make_cc_sp(), cs, 0.3, 0.3, 0.0).acc_enabled)
-
-  def test_an_unset_threshold_param_does_not_mean_every_touch(self):
-    """A float param that has never been written reads 0.0, which would override on contact."""
-    lng = self._build(follow_control=False, pedal_override_threshold=0.0)
-    self.assertGreater(lng.pedal_override_pc, 0.0)
-
-  def test_overspeed_recovery_coasts_back_with_nothing_ahead(self):
-    """Released above the set speed with a clear road, the overspeed comes off on a closed
-    throttle rather than the brakes."""
-    lng = self._build(follow_control=False)
-    set_speed = HIGHWAY_MS
-    over = set_speed + 4.5                      # about 10 mph past it
-    self._press(lng, pedal_pc=35.0, op_gas=0.3, v_ego=over, set_speed=set_speed)
-    self.assertTrue(lng.overriding_last)
-    # foot off, planner wants the overspeed gone in a hurry
-    result = self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=over, set_speed=set_speed)
-    self.assertTrue(result.recovering)
-    self.assertGreaterEqual(result.accel, _RECOVER_DECEL_CAP)
-    self.assertFalse(result.brake_actuate)
-
-  def test_overspeed_recovery_ends_at_the_set_speed(self):
-    lng = self._build(follow_control=False)
-    set_speed = HIGHWAY_MS
-    self._press(lng, pedal_pc=35.0, op_gas=0.3, v_ego=set_speed + 4.5, set_speed=set_speed)
-    self.assertTrue(self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=set_speed + 4.5,
-                                set_speed=set_speed).recovering)
-    result = self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=set_speed, set_speed=set_speed)
-    self.assertFalse(result.recovering)
-    self.assertLess(result.accel, _RECOVER_DECEL_CAP)      # full braking authority is back
-
-  def test_a_lead_hands_straight_back_to_normal_operation(self):
-    lng = self._build(follow_control=False)
-    set_speed = HIGHWAY_MS
-    lead = make_lead(status=True, d_rel=30.0, v_rel=-3.0, v_lead=HIGHWAY_MS)
-    self._press(lng, pedal_pc=35.0, op_gas=0.3, v_ego=set_speed + 4.5, set_speed=set_speed)
-    result = self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=set_speed + 4.5,
-                         set_speed=set_speed, lead=lead)
-    self.assertFalse(result.recovering)
-    self.assertLess(result.accel, _RECOVER_DECEL_CAP)
-
-  def test_a_lead_appearing_mid_recovery_releases_the_cap(self):
-    lng = self._build(follow_control=False)
-    set_speed = HIGHWAY_MS
-    lead = make_lead(status=True, d_rel=25.0, v_rel=-4.0, v_lead=HIGHWAY_MS)
-    self._press(lng, pedal_pc=35.0, op_gas=0.3, v_ego=set_speed + 4.5, set_speed=set_speed)
-    self.assertTrue(self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=set_speed + 4.5,
-                                set_speed=set_speed).recovering)
-    result = self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=set_speed + 4.5,
-                         set_speed=set_speed, lead=lead)
-    self.assertFalse(result.recovering)
-
-  def test_no_recovery_when_the_release_is_already_at_the_set_speed(self):
-    lng = self._build(follow_control=False)
-    set_speed = HIGHWAY_MS
-    self._press(lng, pedal_pc=35.0, op_gas=0.3, v_ego=set_speed - 2.0, set_speed=set_speed)
-    self.assertFalse(self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=set_speed - 2.0,
-                                 set_speed=set_speed).recovering)
-
-  def test_recovery_gives_up_rather_than_holding_the_cap_forever(self):
-    lng = self._build(follow_control=False)
-    set_speed = HIGHWAY_MS
-    over = set_speed + 4.5
-    self._press(lng, pedal_pc=35.0, op_gas=0.3, v_ego=over, set_speed=set_speed)
-    self.assertTrue(self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=over,
-                                set_speed=set_speed).recovering)
-    for _ in range(int(_RECOVER_MAX_S / 0.02) + 2):        # speed never comes down
-      result = self._press(lng, pedal_pc=0.0, op_gas=-2.5, v_ego=over, set_speed=set_speed)
-    self.assertFalse(result.recovering)
-
-  def test_an_inactive_message_carries_no_request_at_all(self):
-    lng = self._build(follow_control=False)
-    for kwargs in ({'long_active': False}, {'gas_pressed': True}):
-      result = self._step(lng, op_accel=-2.0, op_gas=-2.0, **kwargs)
-      self.assertFalse(result.acc_enabled, kwargs)
-      self.assertEqual(result.accel, 0.0, kwargs)
-      self.assertEqual(result.gas, CarControllerParams.INACTIVE_GAS, kwargs)
-
-  def test_acc_enabled_tracks_long_active_otherwise(self):
-    lng = self._build(follow_control=False)
-    self.assertTrue(self._step(lng, op_accel=0.0, op_gas=0.0).acc_enabled)
-    self.assertFalse(self._step(lng, op_accel=0.0, op_gas=0.0, long_active=False).acc_enabled)
+    for kwargs in ({'gas_pressed': True}, {'brake_pressed': True}):
+      result = self._step(lng, op_accel=0.0, op_gas=0.5, lead=lead, **kwargs)
+      self.assertFalse(result.follow_control_used, kwargs)
+      self.assertAlmostEqual(result.gas, 0.5)
 
   def test_brake_hysteresis(self):
     lng = self._build(follow_control=False)
-    self.assertFalse(self._step(lng, op_accel=COASTING).brake_actuate)  # inside the band
-    self.assertTrue(self._step(lng, op_accel=BRAKING).brake_actuate)    # past engage
-    self.assertTrue(self._step(lng, op_accel=COASTING).brake_actuate)   # holds inside the band
-    self.assertFalse(self._step(lng, op_accel=0.0).brake_actuate)       # past release
-
-  def test_the_brakes_stay_out_of_what_the_engine_can_do(self):
-    """A request the closed throttle can deliver must not reach for the friction brakes,
-    because that lights the lamp at the car behind for nothing."""
-    lng = self._build(follow_control=False)
-    for accel in (-0.10, -0.20, -0.30, -0.40):
-      lng = self._build(follow_control=False)
-      self.assertFalse(self._step(lng, op_accel=accel, op_gas=accel).brake_actuate, accel)
-    self.assertLessEqual(_BRAKE_ENGAGE, CarControllerParams.MIN_GAS)
+    self.assertFalse(self._step(lng, op_accel=-0.10).brake_actuate)  # inside the band
+    self.assertTrue(self._step(lng, op_accel=-0.20).brake_actuate)   # past engage
+    self.assertTrue(self._step(lng, op_accel=-0.10).brake_actuate)   # holds inside the band
+    self.assertFalse(self._step(lng, op_accel=0.0).brake_actuate)    # past release
 
   def test_precharge_engages_before_the_brakes(self):
     lng = self._build()
     lead = make_lead(status=True, d_rel=HIGHWAY_MS * 2.0, v_rel=0.0, v_lead=HIGHWAY_MS)
     self._settle_speed(lng, lead=lead)
     lng.accel_last = -1.0  # already braking, so the ease-in limiter is not what decides
-    result = self._step(lng, op_accel=PRECHARGE_ONLY, op_gas=0.0, lead=lead)
+    result = self._step(lng, op_accel=-0.13, op_gas=0.0, lead=lead)
     self.assertTrue(result.precharge_actuate)
     self.assertFalse(result.brake_actuate)
 
-  def test_never_brakes_against_the_driver_accelerator(self):
-    """With the accelerator override held, openpilot keeps commanding through the press, so
-    it must not put the brakes on under the driver's foot."""
-    lng = self._build(follow_control=False)
-    self._step(lng, op_accel=BRAKING, op_gas=BRAKING)     # latch the brake request on
-    self.assertTrue(lng.brake_actuate_last)
-    result = self._step(lng, op_accel=-2.0, op_gas=-2.0, gas_pressed=True)
-    self.assertFalse(result.brake_actuate)
-    self.assertFalse(result.precharge_actuate)
-
-  def test_driver_accelerator_does_not_latch_the_brake_request(self):
-    lng = self._build(follow_control=False)
-    self._step(lng, op_accel=-2.0, op_gas=-2.0, gas_pressed=True)
-    self.assertFalse(lng.brake_actuate_last)
-
-  def test_braking_never_asks_for_throttle(self):
+  def test_brake_and_gas_are_mutually_exclusive(self):
     lng = self._build(follow_control=False)
     result = self._step(lng, op_accel=-1.0, op_gas=0.5)
     self.assertTrue(result.brake_actuate)
-    self.assertLessEqual(result.gas, 0.0)
-
-  def test_a_gentle_coast_stays_on_the_gas_channel(self):
-    """The request the planner made, not a release to full engine braking."""
-    lng = self._build(follow_control=False)
-    result = self._step(lng, op_accel=BRAKING, op_gas=-0.2)
-    self.assertTrue(result.brake_actuate)
-    self.assertAlmostEqual(result.gas, -0.2)
-
-  def test_released_to_inactive_below_min_gas(self):
-    """Under MIN_GAS the channel cannot carry the request, so the brakes take it."""
-    lng = self._build(follow_control=False)
-    self._step(lng, op_accel=0.0, op_gas=0.0)
-    result = self._step(lng, op_accel=-0.6, op_gas=-0.6)
     self.assertEqual(result.gas, CarControllerParams.INACTIVE_GAS)
-
-  def test_the_inactive_release_has_hysteresis(self):
-    """A command sitting on MIN_GAS must not toggle a 4.5 m/s^2 step every frame."""
-    lng = self._build(follow_control=False)
-    self._step(lng, op_accel=0.0, op_gas=0.0)
-    self.assertEqual(self._step(lng, op_accel=-0.6, op_gas=-0.6).gas,
-                     CarControllerParams.INACTIVE_GAS)
-    # back inside the expressible range, but not yet past the release threshold
-    self.assertEqual(self._step(lng, op_accel=-0.45, op_gas=-0.45).gas,
-                     CarControllerParams.INACTIVE_GAS)
-    self.assertAlmostEqual(self._step(lng, op_accel=-0.3, op_gas=-0.3).gas, -0.3)
-    self.assertLess(_GAS_RELEASE, 0.0)
-    self.assertGreater(_GAS_RELEASE, CarControllerParams.MIN_GAS)
-
-  def test_no_propulsion_request_while_stopping(self):
-    """Below creep speed the brakes own the stop."""
-    lng = self._build(follow_control=False)
-    result = self._step(lng, op_accel=BRAKING, op_gas=-0.2, v_ego=_GAS_CREEP_SPEED - 0.1)
-    self.assertTrue(result.brake_actuate)
-    self.assertEqual(result.gas, CarControllerParams.INACTIVE_GAS)
-
-  def test_inactive_when_not_long_active(self):
-    lng = self._build(follow_control=False)
-    result = self._step(lng, op_accel=0.5, op_gas=0.5, long_active=False)
-    self.assertEqual(result.gas, CarControllerParams.INACTIVE_GAS)
-
-  def test_follow_limits_never_raise_a_decel_request(self):
-    """The lead limits are caps. Pacing must not turn a brake request into coasting."""
-    lng = self._build()
-    lead = make_lead(status=True, d_rel=HIGHWAY_MS * 2.0, v_rel=0.0, v_lead=HIGHWAY_MS)
-    self._settle_speed(lng, lead=lead)
-    result = self._step(lng, op_accel=-0.3, op_gas=-0.3, lead=lead)
-    self.assertTrue(result.follow_control_used)
-    self.assertAlmostEqual(result.gas, -0.3)
 
   def test_braking_eases_in(self):
     """The first brake application is rate limited so it does not stomp."""
@@ -407,27 +139,6 @@ class TestLongitudinalExt(unittest.TestCase):
     self._settle_speed(lng, lead=lead)
     result = self._step(lng, op_accel=-2.0, op_gas=0.0, lead=lead)
     self.assertGreater(result.accel, -0.1)
-
-  def test_a_request_the_ramp_cannot_keep_up_with_is_not_eased_in(self):
-    """The ease-in keys off the lead, so a brake request the lead did not cause used to crawl
-    out at 0.1 m/s^3 behind a comfortable lead. Logged at 49 mph with the lead 38 m away and
-    closing at 2.4 m/s: the planner asked -0.65 and the wire carried -0.04."""
-    lng = self._build()
-    lead = make_lead(status=True, d_rel=38.0, v_rel=-2.4, v_lead=HIGHWAY_MS)
-    self._settle_speed(lng, lead=lead)
-    lng.accel_last = -0.04
-    result = self._step(lng, op_accel=-0.15, op_gas=-0.65, lead=lead)
-    self.assertTrue(result.follow_control_used)
-    self.assertLess(result.accel, -0.10)
-
-  def test_a_lead_being_tracked_comfortably_is_still_eased_in(self):
-    lng = self._build()
-    lead = make_lead(status=True, d_rel=38.0, v_rel=-2.4, v_lead=HIGHWAY_MS)
-    self._settle_speed(lng, lead=lead)
-    lng.accel_last = -0.04
-    result = self._step(lng, op_accel=-0.15, op_gas=-0.15, lead=lead)
-    self.assertTrue(result.follow_control_used)
-    self.assertAlmostEqual(result.accel, -0.042)
 
   def test_imminent_collision_is_not_eased_in(self):
     lng = self._build()

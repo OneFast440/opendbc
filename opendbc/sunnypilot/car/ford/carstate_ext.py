@@ -55,10 +55,6 @@ class CarStateExt:
     self.CP = CP
     self.CP_SP = CP_SP
     self.brake_lamp_source: str | None = None
-    # Raw accelerator pedal position, percent. ret.gasPressed is this > 1e-6, so the lightest
-    # possible touch reads as a full override; the longitudinal extension needs the number
-    # itself to tell a feathered pedal from a real one.
-    self.accelerator_pedal_pc = 0.0
 
     self.pressed = dict.fromkeys({b.can_msg for b in BUTTONS}, False)
     # What a combo button reported when it went down, so its release matches.
@@ -109,8 +105,6 @@ class CarStateExt:
 
     self.cruise_enabled_last = cruise_enabled
     ret.buttonEvents = list(ret.buttonEvents) + events
-
-    self.accelerator_pedal_pc = float(cp.vl["EngVehicleSpThrottle"]["ApedPos_Pc_ActlArb"])
 
     if self.CP_SP.fordHud.brakeLightStatus:
       self._update_brake_lights(ret_sp, cp)
