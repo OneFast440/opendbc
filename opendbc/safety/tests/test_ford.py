@@ -615,6 +615,11 @@ class TestFordCANFDLongitudinalSafety(TestFordLongitudinalSafetyBase):
 # because c2 is still the actuator there and must keep every stock protection.
 
 PATH_ANGLE_TO_CAN = 2000            # 1 / 0.0005 rad per LSB
+# mirrors values_ext.py ANGLE_PATH_OFFSET_*, x1.02, plus two LSB of packing slack
+PATH_OFFSET_MAX_BP = [8., 14., 15.]
+PATH_OFFSET_MAX_V = [1.02, 0.0, 0.0]
+PATH_OFFSET_SLACK = 0.02
+PATH_OFFSET_ROC = 0.1               # openpilot's; the panda allows 0.102 + 1 LSB
 PATH_ANGLE_ROC_BP = [10., 15., 25.]
 PATH_ANGLE_ROC_V = [0.0561, 0.04335, 0.00918]
 
@@ -743,13 +748,94 @@ class TestFordAngleControlSafetyBase(FordBluePilotSafetyHarness):
       self.assertFalse(self._tx(self._lat_ctl_msg(True, 0.0, curvature=curvature)),
                        f"curvature {curvature} was allowed in angle mode")
 
-  def test_curvature_rate_and_path_offset_must_stay_inactive(self):
-    for path_offset in (-1.0, -0.02, 0.02, 1.0):
-      self._engage()
-      self.assertFalse(self._tx(self._lat_ctl_msg(True, 0.0, path_offset=path_offset)))
+  def test_curvature_rate_must_stay_inactive(self):
     for curvature_rate in (-0.001, -0.00005, 0.00005, 0.001):
       self._engage()
       self.assertFalse(self._tx(self._lat_ctl_msg(True, 0.0, curvature_rate=curvature_rate)))
+
+  @staticmethod
+  def _max_path_offset(speed: float) -> float:
+    return float(np.interp(speed - 1.0, PATH_OFFSET_MAX_BP, PATH_OFFSET_MAX_V)) + PATH_OFFSET_SLACK
+
+  def _ramp_path_offset(self, target: float) -> bool:
+    """Walk c0 to target one rate-limited step at a time; True if every frame was allowed."""
+    offset, step = 0.0, PATH_OFFSET_ROC if target > 0 else -PATH_OFFSET_ROC
+    while abs(target - offset) > 1e-9:
+      offset = target if abs(target - offset) < PATH_OFFSET_ROC else offset + step
+      if not self._tx(self._lat_ctl_msg(True, 0.0, path_offset=offset)):
+        return False
+    return True
+
+  def test_path_offset_reaches_its_limit_at_low_speed(self):
+    """c0 is the second channel for tight low-speed turns: the full 1.0 m, either sign, and no
+    further."""
+    for speed in (3.0, 6.0, 8.5):
+      for sign in (1.0, -1.0):
+        with self.subTest(speed=speed, sign=sign):
+          self._engage(speed)
+          self.assertTrue(self._ramp_path_offset(sign * 1.0))
+          self.assertFalse(self._tx(self._lat_ctl_msg(True, 0.0, path_offset=sign * 1.1)))
+
+  def test_path_offset_fades_out_with_speed(self):
+    """Above curvature_error_min_speed c0's curvature is invisible to the shadow check, so its
+    ceiling falls with speed and is all but zero from 15 m/s."""
+    for speed in (11.0, 13.0, 15.0, 30.0):
+      limit = self._max_path_offset(speed)
+      for sign in (1.0, -1.0):
+        with self.subTest(speed=speed, sign=sign):
+          inside = round(sign * (limit - 0.02), 2)
+          self._engage(speed)
+          self.assertTrue(self._ramp_path_offset(inside), f"{inside} m blocked at {speed} m/s")
+          self._engage(speed)
+          outside = round(sign * (limit + 0.03), 2)
+          self.assertFalse(self._ramp_path_offset(outside), f"{outside} m allowed at {speed} m/s")
+    self.assertAlmostEqual(self._max_path_offset(30.0), PATH_OFFSET_SLACK)
+
+  def test_path_offset_rate_limit(self):
+    for sign in (1.0, -1.0):
+      self._engage(6.0)
+      self.assertTrue(self._tx(self._lat_ctl_msg(True, 0.0, path_offset=sign * PATH_OFFSET_ROC)))
+      self._engage(6.0)
+      self.assertFalse(self._tx(self._lat_ctl_msg(True, 0.0, path_offset=sign * 2 * PATH_OFFSET_ROC)))
+
+  def test_path_offset_inactive_when_not_steering(self):
+    self._engage(6.0)
+    self.assertTrue(self._tx(self._lat_ctl_msg(False, 0.0, path_offset=0.0)))
+    self.assertFalse(self._tx(self._lat_ctl_msg(False, 0.0, path_offset=0.05)))
+
+  def test_path_offset_needs_controls_allowed(self):
+    self._engage(6.0)
+    self.safety.set_controls_allowed(False)
+    self.safety.set_controls_allowed_lateral(False)
+    self.assertFalse(self._tx(self._lat_ctl_msg(True, 0.0, path_offset=0.05)))
+
+  def test_openpilot_c0_split_is_never_blocked(self):
+    """Closed loop against the real controller: its c0/c1 split, at the full 1.0 m limit, through
+    a tight turn in and out at every speed the fade covers, never trips a check."""
+    from opendbc.car.ford.values import CAR
+    from opendbc.sunnypilot.car.ford.lateral_angle_ext import LateralAngleExt
+    from opendbc.sunnypilot.car.ford.tests.helpers import make_actuators, make_car_params, make_cc, make_cc_sp, make_cs
+    for speed in (3.0, 6.0, 9.0, 12.0, 15.0):
+      for sign in (1.0, -1.0):
+        with self.subTest(speed=speed, sign=sign):
+          CP, CP_SP = make_car_params(CAR.FORD_F_150_MK14, mode=PrimaryLateralControl.angle, path_offset_limit=1.0)
+          ctrl = LateralAngleExt(CP, CP_SP)
+          peak = sign * min(2.5 / speed ** 2, 0.08)
+          request = list(np.linspace(0.0, peak, 30)) + [peak] * 40 + list(np.linspace(peak, 0.0, 30)) + [0.0] * 20
+          self._engage(speed)
+          saw_c0 = False
+          for kappa in request:
+            # the truck on the request, so the deviation band is not what is under test
+            self._set_speed_and_curvature(speed, -kappa)
+            r = ctrl.update(make_cc(curvature=kappa), make_cc_sp(model_curvature=kappa),
+                            make_cs(v_ego=speed, yaw_rate=-kappa * speed), make_actuators(kappa))
+            # create_lka_msg saturates the shadow at the c2 signal range before it goes out
+            self.assertTrue(self._tx(self._lka_msg(True, float(np.clip(-ctrl.shadow_curvature, -self.MAX_CURVATURE,
+                                                                         self.MAX_CURVATURE)))))
+            self.assertTrue(self._tx(self._lat_ctl_msg(True, -r.path_angle, path_offset=-r.path_offset)),
+                            f"blocked: kappa {kappa} c0 {r.path_offset} c1 {r.path_angle}")
+            saw_c0 |= abs(r.path_offset) > 0.05
+          self.assertEqual(saw_c0, speed < 14.0, "test is not exercising c0 where it should")
 
   def test_path_angle_can_reach_the_full_dbc_range(self):
     """path_angle is the actuator in angle mode, so the whole signal range must be reachable one
@@ -998,7 +1084,8 @@ class TestFordCurvatureControlSafetyBase(FordBluePilotSafetyHarness):
     self.assertFalse(self._tx(self._lat_ctl_msg(False, 0.01)))
 
   def test_path_offset_must_stay_inactive(self):
-    """c0 and c1 fight each other on this platform, so openpilot never sends c0."""
+    """BluePilot found c0 and c1 fight each other in this strategy, so it never sends c0. Only
+    angle mode, which sizes c1 down by what c0 adds, may."""
     for path_offset in (-1.0, -0.02, 0.02, 1.0):
       self._engage()
       self.assertFalse(self._tx(self._lat_ctl_msg(True, 0.0, path_offset=path_offset)))

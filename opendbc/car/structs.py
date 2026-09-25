@@ -86,6 +86,7 @@ class CarParamsSP:
     lanePositioningGain: float = auto_field()
     satObserver: bool = auto_field()
     deliveryCompensation: bool = auto_field()
+    pathOffsetLimit: float = auto_field()
 
   @auto_dataclass
   class FordLongitudinalTuning:

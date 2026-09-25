@@ -18,6 +18,7 @@ from opendbc.car.toyota.values import ToyotaSafetyFlags
 from opendbc.sunnypilot.car.hyundai.enable_radar_tracks import enable_radar_tracks as hyundai_enable_radar_tracks
 from opendbc.sunnypilot.car.hyundai.longitudinal.helpers import LongitudinalTuningType
 from opendbc.sunnypilot.car.ford.values_ext import (
+  ANGLE_PATH_OFFSET_LIMIT_RANGE,
   BLEND_RATIO_RANGE,
   FordSafetyFlagsSP,
   HIGH_SPEED_DAMPENING_RANGE,
@@ -214,6 +215,7 @@ def _initialize_ford(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_d
     lateral.laneChangeFactor = _clamp_tuning(params_dict.get("FordLaneChangeFactor_ang"), LANE_CHANGE_FACTOR_RANGE)
     lateral.satObserver = _bool_param(params_dict, "FordSatObserver_ang")
     lateral.deliveryCompensation = _bool_param(params_dict, "FordDeliveryCompensation_ang")
+    lateral.pathOffsetLimit = _clamp_tuning(params_dict.get("FordPathOffsetLimit_ang"), ANGLE_PATH_OFFSET_LIMIT_RANGE)
     # Shared with curvature mode. Angle mode used to hard-wire this on, so the setting only ever
     # controlled curvature mode; reading it here is what makes the toggle mean what it says in
     # both. Same default, so nothing changes for anyone who has not chosen.

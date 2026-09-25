@@ -89,6 +89,18 @@ T_IDXS = [
 
 # DBC LatCtlCurv_No_Actl magnitude limit (1/m). Also the panda's FORD_STEERING_LIMITS.max_curvature.
 CURVATURE_MAX = 0.02
+# Angle mode's path offset (c0). Angle mode steers with c1 alone, and the PSCM follows c1 into
+# its internal request at only ~0.1 rad/s (PSCM walkthrough, reference image ML3V-14D003-BD; the
+# fit to this truck's logs prefers 0.05-0.1). A tight low-speed turn needs 0.3-0.5 rad of c1, so
+# it takes seconds to build no matter what openpilot asks. c0 is a second channel the module
+# follows at 1.5 m/s. Its effect is capped where the PSCM's path supervisor saturates it (1.0 m),
+# and it fades out with speed: it buys nothing on the highway, and above 9 m/s its curvature is
+# invisible to the shadow deviation check. Mirrored by the panda (ford_path_offset_cmd_checks).
+ANGLE_PATH_OFFSET_LIMIT_RANGE = (0.0, 0.0, 1.0)   # (default off, min, max) metres
+ANGLE_PATH_OFFSET_MAX = 1.0                        # m, supervisor saturation; the panda's ceiling
+ANGLE_PATH_OFFSET_SPEED_BP = (2.0, 4.0, 8.0, 14.0)  # m/s
+ANGLE_PATH_OFFSET_SPEED_V = (0.0, 1.0, 1.0, 0.0)    # fraction of the limit allowed
+ANGLE_PATH_OFFSET_ROC = 0.1                        # m per 20 Hz call, just above the PSCM's 1.5 m/s
 # DBC LatCtlCurv_NoRate_Actl / LatCtlCrv_NoRate2_Actl magnitude limit (1/m^2).
 CURVATURE_RATE_MAX = 0.001023
 # DBC LatCtlPath_An_Actl range (rad). The panda mirror lives in safety/modes/ford.h; the PSCM

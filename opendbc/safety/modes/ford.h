@@ -130,6 +130,10 @@ static uint16_t ford_lateral_mode = FORD_LAT_STOCK;
 static bool ford_angle_mode_engaged = false;  // latched out of Lane_Assist_Data1 in ford_tx_hook
 static int ford_shadow_curvature_raw = 0;     // wire units, scale 1e-6 1/m
 static int ford_desired_path_angle_last = 0;
+static int ford_desired_path_offset_last = 0;
+
+// LatCtlPathOffst_L_Actl scaling: 0.01 m per LSB, [-5.12, 5.11] m, 512 = 0 m.
+#define FORD_PATH_OFFSET_TO_CAN 100.0f
 
 // shadow_curvature is sent at a wire scale of 1e-6 1/m (see fordcan_ext.py); convert to the CAN
 // units the curvature checks use, matching FORD_STEERING_LIMITS.curvature_to_can (50000):
@@ -315,14 +319,52 @@ static bool ford_curvature_cmd_checks(int desired_curvature, bool steer_control_
   return violation;
 }
 
+// Angle mode's path offset (c0). The PSCM follows c1 into its internal request at only ~0.1 rad/s,
+// which makes tight low-speed turns take seconds to build; c0 is a second channel it follows at
+// 1.5 m/s. Mirrors values_ext.py ANGLE_PATH_OFFSET_*: at most 1.0 m, where the PSCM's path
+// supervisor saturates c0 anyway, fading to nothing between 8 and 14 m/s, and moving at most
+// 0.1 m per 20 Hz call. The fade is what bounds c0 where it matters: above
+// curvature_error_min_speed its curvature is not part of the shadow the deviation band checks, so
+// by then it must be all but gone. Everything here is x1.02 of openpilot's own limit plus two
+// LSB of packing slack, and the speed is fudged down 1 m/s, which only loosens a falling limit.
+// openpilot also fades c0 in between 2 and 4 m/s, a modelling caution rather than a safety bound;
+// the 1.0 m ceiling that applies from there to 8 m/s holds below it too.
+static bool ford_path_offset_cmd_checks(int desired_path_offset, bool steer_control_enabled) {
+  static const struct lookup_t FORD_ANGLE_MAX_PATH_OFFSET = {
+    {8., 14., 15.},
+    {1.02, 0.0, 0.0}
+  };
+  // 0.102 m per call (openpilot's 0.1 x1.02) in 0.01 m LSB, plus one LSB of packing slack
+  static const int FORD_ANGLE_PATH_OFFSET_ROC_CAN = 11;
+
+  bool violation = false;
+
+  if (steer_control_enabled) {
+    const float fudged_speed = (vehicle_speed.min / VEHICLE_SPEED_FACTOR) - 1.;
+    const int max_offset = (safety_interpolate(FORD_ANGLE_MAX_PATH_OFFSET, fudged_speed) * FORD_PATH_OFFSET_TO_CAN) + 2.;
+    const int min_offset = -max_offset;
+    violation |= safety_max_limit_check(desired_path_offset, max_offset, min_offset);
+
+    violation |= safety_max_limit_check(desired_path_offset, ford_desired_path_offset_last + FORD_ANGLE_PATH_OFFSET_ROC_CAN,
+                                        ford_desired_path_offset_last - FORD_ANGLE_PATH_OFFSET_ROC_CAN);
+  } else {
+    // path_offset must be at its inactive sentinel while not steering
+    violation |= desired_path_offset != 0;
+  }
+
+  // recorded even on a violation, for the same reason as path_angle above
+  ford_desired_path_offset_last = desired_path_offset;
+  if (!(controls_allowed || controls_allowed_lateral)) {
+    ford_desired_path_offset_last = 0;
+  }
+
+  return violation;
+}
+
 static bool ford_bp_tx_checks(bool steer_control_enabled, unsigned int raw_curvature,
                               unsigned int raw_path_angle, unsigned int raw_path_offset,
                               unsigned int raw_curvature_rate, unsigned int inactive_curvature_rate) {
   bool violation = false;
-
-  // c0 is computed by both strategies but never sent: c0 and c1 fight each other on this
-  // platform, and the ride is worse with both.
-  violation |= raw_path_offset != FORD_INACTIVE_PATH_OFFSET;
 
   const int desired_curvature = (int)raw_curvature - (int)FORD_INACTIVE_CURVATURE;
   const int desired_path_angle = (int)raw_path_angle - (int)FORD_INACTIVE_PATH_ANGLE;
@@ -338,6 +380,7 @@ static bool ford_bp_tx_checks(bool steer_control_enabled, unsigned int raw_curva
     violation |= raw_curvature != FORD_INACTIVE_CURVATURE;
     violation |= raw_curvature_rate != inactive_curvature_rate;
     violation |= ford_path_angle_cmd_checks(desired_path_angle, steer_control_enabled, 0);
+    violation |= ford_path_offset_cmd_checks((int)raw_path_offset - (int)FORD_INACTIVE_PATH_OFFSET, steer_control_enabled);
     violation |= ford_shadow_curvature_checks(ford_shadow_curvature_to_can(ford_shadow_curvature_raw),
                                               steer_control_enabled, FORD_STEERING_LIMITS);
 
@@ -365,6 +408,9 @@ static bool ford_bp_tx_checks(bool steer_control_enabled, unsigned int raw_curva
     // c1 only trims lane position, so it is held to a far tighter cap than the signal allows.
     violation |= ford_curvature_cmd_checks(desired_curvature, steer_control_enabled, FORD_STEERING_LIMITS);
     violation |= ford_path_angle_cmd_checks(desired_path_angle, steer_control_enabled, FORD_CURV_MODE_MAX_PATH_ANGLE);
+    // c0 is computed here but never sent: BluePilot found c0 and c1 fight each other in this
+    // strategy. Angle mode instead sizes c1 down by what c0 adds, and may send it.
+    violation |= raw_path_offset != FORD_INACTIVE_PATH_OFFSET;
   }
 
   return violation;
@@ -629,6 +675,7 @@ static safety_config ford_init(uint16_t param) {
   ford_angle_mode_engaged = false;
   ford_shadow_curvature_raw = 0;
   ford_desired_path_angle_last = 0;
+  ford_desired_path_offset_last = 0;
 
   // sunnypilot: openpilot longitudinal follows the alpha longitudinal toggle on every Ford, so
   // ACCDATA is in the allowlist only when the toggle is on. Two changes from upstream:

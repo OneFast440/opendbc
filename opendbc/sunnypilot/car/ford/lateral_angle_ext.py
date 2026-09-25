@@ -32,6 +32,10 @@ from opendbc.car.ford.values import CarControllerParams
 from opendbc.sunnypilot.car.ford.human_turn import HumanTurnDetector
 from opendbc.sunnypilot.car.ford.lateral_common import INACTIVE_RESULT, FordLateralResult, get_current_curvature
 from opendbc.sunnypilot.car.ford.values_ext import (
+  ANGLE_PATH_OFFSET_LIMIT_RANGE,
+  ANGLE_PATH_OFFSET_ROC,
+  ANGLE_PATH_OFFSET_SPEED_BP,
+  ANGLE_PATH_OFFSET_SPEED_V,
   FORD_DBC_PATH_ANGLE_MAX,
   FORD_DBC_PATH_ANGLE_MIN,
   HIGH_SPEED_DAMPENING_RANGE,
@@ -175,6 +179,19 @@ _SAT_OBS_HIST_LEN = _SAT_OBS_LAG_IDX + 2
 _SOFT_ROC_SPEED_BP = [9.0, 10.0, 15.0, 25.0]      # m/s
 _SOFT_ROC_V = [0.055, 0.055, 0.0425, 0.009]       # rad/call
 
+# *** c0 / c1 split (see values_ext ANGLE_PATH_OFFSET_*) ***
+# The PSCM turns held c0 and c1 into a curvature request, g0 * c0 + g1 * c1. Its c1 gain on this
+# truck fits pure-pursuit geometry with a 2.6 s look-ahead: a model of the whole chain built on
+# that reproduces 32 logged hands-off segments at R^2 0.986. The same geometry gives the c0 gain,
+# 2 / (v T)^2. c0 has never been sent on this truck, so that gain is inferred rather than
+# measured; the limit is the user's dial for exactly that reason, and it defaults to off.
+_PSCM_LOOKAHEAD_S = 2.6
+_C0_GEOMETRY_MIN_SPEED = 4.0      # m/s; below it the geometry would make c0 arbitrarily strong
+# Equal arrival: the PSCM slews its held copies at 1.5 m/s (c0) and 0.1 rad/s (c1), so c0 = 15 c1
+# gets both to their endpoints together, which is the allocation the walkthrough's controller
+# uses, capped where the supervisor saturates c0 with the remainder left on c1.
+_C0_ARRIVAL = 1.5 / 0.1           # m of c0 per rad of c1
+
 # Exit-biased blend: near the DBC limit, or while the planner is actively unwinding, drop the
 # model's weight so the planner's unwind dominates instead of being diluted by a prediction that
 # still sees the curve (slow unwind) or that snaps when its window crosses the exit.
@@ -239,6 +256,12 @@ class LateralAngleExt:
 
     self.path_angle_last = 0.0
     self.desired_curvature_last = 0.0
+
+    # c0 split, off unless the user sets a limit. path_angle_last above stays the full c1-equivalent
+    # command, which every limit and detector in this file reasons about; these are what went out.
+    self.path_offset_limit = _tuned(tuning.pathOffsetLimit, ANGLE_PATH_OFFSET_LIMIT_RANGE)
+    self.path_offset_last = 0.0
+    self.c1_sent_last = 0.0
 
     # kappa that path_angle was derived from. Published to the panda as shadow_curvature: angle
     # mode pins the real curvature signal at its inactive sentinel, so without this there is no
@@ -373,6 +396,8 @@ class LateralAngleExt:
     """Zero the command and publish a truthful shadow. Used by the inactive, human-turn and
     stall-blip paths, which all put mode 0 on the wire."""
     self.path_angle_last = 0.0
+    self.path_offset_last = 0.0
+    self.c1_sent_last = 0.0
     self.curvature_deviation_limited = False
     self._clear_saturation_observer()
     # Lane_Assist_Data1 carries the shadow at 33 Hz whenever angle mode is configured, and the
@@ -538,6 +563,7 @@ class LateralAngleExt:
     soft_roc = float(interp(v_ego, _SOFT_ROC_SPEED_BP, _SOFT_ROC_V))
     path_angle = float(clip(path_angle, self.path_angle_last - soft_roc, self.path_angle_last + soft_roc))
     self.path_angle_last = path_angle
+    path_offset, c1 = self._split_path(path_angle, v_ego, gain, soft_roc)
 
     # While the driver is pressing but the human-turn override has not latched yet, the clipped
     # planner kappa cannot keep up with the wheel: the driver moves the measurement faster than
@@ -551,8 +577,8 @@ class LateralAngleExt:
     return FordLateralResult(
       apply_curvature=0.0,
       curvature_rate=0.0,
-      path_offset=0.0,
-      path_angle=path_angle,
+      path_offset=path_offset,
+      path_angle=c1,
       # Inert in Limited mode: the PSCM's slew rate and deadband are fixed calibration
       # (values_ext PSCM_SLEW_*, PSCM_DEADBAND_CAL) and no consumer of a received ramp or
       # precision request selects either. These values are kept exactly as they have always been
@@ -562,6 +588,31 @@ class LateralAngleExt:
       precision_type=precision,
       lat_inactive=False,
     )
+
+  def _split_path(self, path_angle: float, v_ego: float, gain: float, soft_roc: float) -> tuple[float, float]:
+    """Share path_angle, the c1 that asks for this frame's curvature on its own, between c0 and c1.
+
+    c1 gives up exactly what c0 is expected to add (g0 * c0 converted to path-angle units with
+    this frame's gain), so the pair asks for the same curvature the single c1 did. Both are rate
+    limited against what was last sent, which is what the panda checks. With the limit at zero,
+    c0 stays 0 and c1 equals path_angle, so the wire is byte-identical to c1-only.
+    """
+    g0 = 2.0 / (max(v_ego, _C0_GEOMETRY_MIN_SPEED) * _PSCM_LOOKAHEAD_S) ** 2
+    c1_per_c0 = g0 * v_ego * gain
+    cap = self.path_offset_limit * float(interp(v_ego, ANGLE_PATH_OFFSET_SPEED_BP, ANGLE_PATH_OFFSET_SPEED_V))
+    c0 = 0.0
+    if cap > 0.0:
+      c0 = float(clip(_C0_ARRIVAL * path_angle / (1.0 + _C0_ARRIVAL * c1_per_c0), -cap, cap))
+    c0 = float(clip(c0, self.path_offset_last - ANGLE_PATH_OFFSET_ROC, self.path_offset_last + ANGLE_PATH_OFFSET_ROC))
+    c1 = path_angle
+    if c0 != 0.0 or self.path_offset_last != 0.0:
+      # path_angle is already rate limited; what c1 gives up to c0 is not, so hold the sent c1 to
+      # the same limit. With c0 idle this branch never runs and c1 is path_angle exactly.
+      c1 = float(clip(path_angle - c1_per_c0 * c0, self.c1_sent_last - soft_roc, self.c1_sent_last + soft_roc))
+      c1 = float(clip(c1, FORD_DBC_PATH_ANGLE_MIN, FORD_DBC_PATH_ANGLE_MAX))
+    self.path_offset_last = c0
+    self.c1_sent_last = c1
+    return c0, c1
 
   def _update_stall_detection(self, CS, desired_curvature: float, current_curvature: float) -> None:
     """Arm the mode-0 pulse when, hands-free, the command has led the measurement by more than
