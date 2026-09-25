@@ -194,6 +194,32 @@ class TestLateralAngleExt(unittest.TestCase):
     self.assertFalse(result.lat_inactive)
     self.assertFalse(self.lat.stall_blip_active)
 
+  def _press_then_release(self, v_ego, curvature, yaw_rate=0.0):
+    lat = LateralAngleExt(self.CP, self.CP_SP)
+    for _ in range(int(0.6 / STEER_DT)):
+      lat.update(make_cc(), make_cc_sp(model_curvature=curvature),
+                 make_cs(v_ego=v_ego, yaw_rate=yaw_rate, steering_pressed=True, steering_angle=5.0),
+                 make_actuators(curvature))
+    return lat.update(make_cc(), make_cc_sp(model_curvature=curvature), make_cs(v_ego=v_ego, yaw_rate=yaw_rate),
+                      make_actuators(curvature))
+
+  def test_no_hand_off_blip_mid_curve_at_speed(self):
+    """The logged case: 24 m/s, planner at 0.003 1/m (1.7 m/s^2), path_angle just under the old
+    0.10 rad guard. Releasing steering for 300 ms there is not a hand-off, it is a dropout."""
+    result = self._press_then_release(24.3, -0.003)
+    self.assertFalse(result.lat_inactive)
+
+  def test_no_hand_off_blip_while_the_truck_is_turning(self):
+    """The planner may already be asking for straight while the truck is still in the curve."""
+    v_ego = 23.8
+    result = self._press_then_release(v_ego, 0.0, yaw_rate=0.0014 * v_ego)   # 0.8 m/s^2
+    self.assertFalse(result.lat_inactive)
+
+  def test_hand_off_blip_still_fires_on_a_gentle_highway_bend(self):
+    v_ego = 24.0
+    result = self._press_then_release(v_ego, 0.0003, yaw_rate=-0.0003 * v_ego)   # 0.17 m/s^2
+    self.assertTrue(result.lat_inactive)
+
   def test_stall_blip_fires_when_the_command_cannot_lead_the_car(self):
     """Hands-free, with the deviation clip binding and the car not following, a pulse must fire."""
     fired = False

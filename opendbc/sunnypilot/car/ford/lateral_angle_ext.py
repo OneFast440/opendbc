@@ -197,6 +197,11 @@ _STALL_MAX_BLIPS = 3              # give up on a stuck episode rather than pulsi
 # sustained press resets the PSCM while the car is still straight and the command small.
 _PRESS_BLIP_MIN_S = 0.5
 _BLIP_MAX_PATH_ANGLE = 0.10       # rad -- the pulse releases steering for 300 ms; never in a curve
+# The path-angle guard above is speed-blind: path_angle ~ kappa * v * G, so 0.10 rad is a parking
+# lot turn at 5 m/s but 1.8 m/s^2 of cornering at 24 m/s. A logged press blip fired there, mid-curve
+# at 54 mph, and released steering for 300 ms. The hand-off blip also needs the corner itself to be
+# gentle, by what the planner asks for and by what the truck is actually doing, whichever is more.
+_PRESS_BLIP_MAX_LAT_ACCEL = 0.5   # m/s^2
 
 def _tuned(value: float, spec: tuple[float, float, float]) -> float:
   """Clamp a user tuning factor, falling back to the default when unset.
@@ -417,9 +422,11 @@ class LateralAngleExt:
     if CS.out.steeringPressed:
       self.press_timer_s += _STEER_DT
     else:
+      cornering = max(abs(float(actuators.curvature)), abs(get_current_curvature(CS))) * v_ego ** 2
       if (self.press_timer_s >= _PRESS_BLIP_MIN_S and self.stall_blip_cooldown_s <= 0.0
           and self.stall_blip_frames_left <= 0
-          and abs(self.path_angle_last) < _BLIP_MAX_PATH_ANGLE):
+          and abs(self.path_angle_last) < _BLIP_MAX_PATH_ANGLE
+          and cornering < _PRESS_BLIP_MAX_LAT_ACCEL):
         self.stall_blip_frames_left = _STALL_BLIP_FRAMES
       self.press_timer_s = 0.0
 
