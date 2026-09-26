@@ -68,13 +68,14 @@ class TestPathOffsetSplit(unittest.TestCase):
       self.assertEqual([r.path_angle for r in off], [r.path_angle for r in ref_out])
 
   def test_c0_carries_part_of_a_tight_low_speed_turn(self):
-    """Same sign as c1, capped at the limit, and c1 gives up what c0 adds."""
+    """Opposite sign to c1 on the wire (see _C0_WIRE_SIGN), capped at the limit, and c1 gives up
+    what c0 adds."""
     for limit in (0.3, 1.0):
       for sign in (1.0, -1.0):
         with self.subTest(limit=limit, sign=sign):
           ctrl = angle_ctrl(limit)
           r = hold(ctrl, 80, sign * TIGHT, 6.0)[-1]
-          self.assertGreater(r.path_offset * sign, 0.0)
+          self.assertLess(r.path_offset * sign, 0.0)
           self.assertAlmostEqual(abs(r.path_offset), limit, places=6)
           self.assertGreater(r.path_angle * sign, 0.0)
           self.assertLess(abs(r.path_angle), abs(ctrl.path_angle_last))
@@ -87,13 +88,14 @@ class TestPathOffsetSplit(unittest.TestCase):
     full = ctrl.path_angle_last
     g0 = 2.0 / (max(v_ego, 4.0) * 2.6) ** 2
     gain = full / (TIGHT * v_ego)
-    self.assertAlmostEqual(r.path_angle + g0 * v_ego * gain * r.path_offset, full, places=6)
+    # c0 in the turn's own direction is the wire value negated back
+    self.assertAlmostEqual(r.path_angle + g0 * v_ego * gain * -r.path_offset, full, places=6)
 
   def test_small_turns_split_by_equal_arrival(self):
     """Below the cap, c0 is 15 m per rad of c1: both held copies arrive together."""
     r = hold(angle_ctrl(1.0), 80, 0.004, 6.0)[-1]
     self.assertLess(abs(r.path_offset), 1.0)
-    self.assertAlmostEqual(r.path_offset / r.path_angle, 15.0, places=4)
+    self.assertAlmostEqual(r.path_offset / r.path_angle, -15.0, places=4)
 
   def test_fades_with_speed(self):
     for v_ego in (1.5, 3.0, 6.0, 10.0, 13.0, 14.0, 20.0, 30.0):
@@ -128,9 +130,10 @@ class TestPathOffsetSplit(unittest.TestCase):
 
 class TestPathOffsetOnTheWire(unittest.TestCase):
 
-  def test_c0_and_c1_leave_with_the_same_sign(self):
-    """The one thing no log on this truck can check: carcontroller negates both onto the wire,
-    and the PSCM reads them as one path, so they must agree in sign or c0 fights c1."""
+  def test_c0_and_c1_leave_with_opposite_signs(self):
+    """Pins the wire convention the first c0 drive pointed to. Sent with the same sign as c1, c0
+    fit the truck's response at -1.0 to -1.5x its expected effect, i.e. it steered the other
+    way, so the PSCM most likely reads path offset as the truck relative to the path."""
     for sign in (1.0, -1.0):
       with self.subTest(sign=sign):
         controller, CP = make_car_controller(CAR.FORD_F_150_MK14, mode=PrimaryLateralControl.angle,
@@ -145,7 +148,7 @@ class TestPathOffsetOnTheWire(unittest.TestCase):
         c0 = sig['path_offset'] - INACTIVE_PATH_OFFSET
         c1 = sig['path_angle'] - INACTIVE_PATH_ANGLE
         self.assertNotEqual(c0, 0)
-        self.assertEqual(np.sign(c0), np.sign(c1))
+        self.assertEqual(np.sign(c0), -np.sign(c1))
         # openpilot's positive curvature goes out negative on both, like path_angle always has
         self.assertEqual(np.sign(c1), -sign)
 

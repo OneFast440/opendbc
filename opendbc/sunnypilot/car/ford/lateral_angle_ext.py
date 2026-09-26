@@ -191,6 +191,15 @@ _C0_GEOMETRY_MIN_SPEED = 4.0      # m/s; below it the geometry would make c0 arb
 # gets both to their endpoints together, which is the allocation the walkthrough's controller
 # uses, capped where the supervisor saturates c0 with the remainder left on c1.
 _C0_ARRIVAL = 1.5 / 0.1           # m of c0 per rad of c1
+# c0 goes on the wire with the opposite sign to c1. Everything above reasons about c0 in the
+# turn's own direction; only what is handed to the message builder is negated. The first drive
+# with c0 on the wire (0.3 m, same sign as c1) felt like wandering, and refitting the calibrated
+# PSCM model to it put c0's effect at -1.0 to -1.5x the geometry: the right size, the wrong way.
+# Scaling c1 alone could not explain that, and the same model fits c0-off drives at 0.98 deg. So
+# the PSCM most likely reads path offset as the truck relative to the path rather than the path
+# relative to the truck, which also explains BluePilot's note that c0 and c1 fight. Evidence is
+# 86 s of hands-off data, so this is a test, and the next c0 log decides it.
+_C0_WIRE_SIGN = -1.0
 
 # Exit-biased blend: near the DBC limit, or while the planner is actively unwinding, drop the
 # model's weight so the planner's unwind dominates instead of being diluted by a prediction that
@@ -577,7 +586,7 @@ class LateralAngleExt:
     return FordLateralResult(
       apply_curvature=0.0,
       curvature_rate=0.0,
-      path_offset=path_offset,
+      path_offset=_C0_WIRE_SIGN * path_offset,
       path_angle=c1,
       # Inert in Limited mode: the PSCM's slew rate and deadband are fixed calibration
       # (values_ext PSCM_SLEW_*, PSCM_DEADBAND_CAL) and no consumer of a received ramp or
