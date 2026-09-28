@@ -53,6 +53,13 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # panda safety mode is set from the same read. See opendbc/sunnypilot/car/ford/values_ext.py.
     self.lateral_mode = PrimaryLateralControl(CP_SP.fordLateralTuning.primaryControl)
     self.lat_angle = LateralAngleExt(CP, CP_SP) if self.lateral_mode == PrimaryLateralControl.angle else None
+    # LatCtl_D2_Rq while steering: 1 = PathFollowingLimitedMode, what openpilot always sends; 2 =
+    # PathFollowingExtendedMode, which the PSCM advertises (LatCtlCpblty_D_Stat = 2) but which has
+    # never been requested on this truck. Only for the closed-course A/B in tools/lateral_maneuvers/
+    # FORD_PSCM.md, only in angle mode, and the param behind it clears itself after one drive. The
+    # panda treats any nonzero mode as steering and applies every check either way.
+    self.lat_active_mode = 2 if (self.lateral_mode == PrimaryLateralControl.angle and
+                                 CP_SP.fordLateralTuning.extendedModeTest) else 1
     self.lat_curv = LateralCurvExt(CP, CP_SP) if self.lateral_mode == PrimaryLateralControl.curvature else None
     self.long_ext = LongitudinalExt(CP, CP_SP)
     self.hud = HudExt(CP, CP_SP)
@@ -177,7 +184,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     lat_active = CC.latActive and not lat.lat_inactive
 
     if self.CP.flags & FordFlags.CANFD:
-      mode = 1 if lat_active else 0
+      mode = self.lat_active_mode if lat_active else 0
       counter = (self.frame // CarControllerParams.STEER_STEP) % 0x10
       return fordcan.create_lat_ctl2_msg(self.packer, self.CAN, mode, -lat.path_offset, -lat.path_angle,
                                          -lat.apply_curvature, -lat.curvature_rate, counter,

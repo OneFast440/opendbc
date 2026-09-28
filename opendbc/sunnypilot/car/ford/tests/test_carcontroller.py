@@ -103,6 +103,20 @@ class TestFordCarControllerLateral(unittest.TestCase):
         self.assertNotEqual(sig[-1]['curvature'], INACTIVE_CURVATURE)
         self.assertNotEqual(sig[-1]['path_angle'], INACTIVE_PATH_ANGLE)
 
+  def test_extended_mode_test_requests_mode_2_in_angle_mode_only(self):
+    """LatCtl_D2_Rq is 1 (Limited) unless the one-drive closed-course flag is set, and then only in
+    angle mode; handing lateral back is still mode 0."""
+    for mode in PrimaryLateralControl:
+      for flag in (False, True):
+        with self.subTest(mode=mode, flag=flag):
+          controller, CP = make_car_controller(CAR.FORD_F_150_MK14, mode=mode, extended_mode_test=flag)
+          active = drive(controller, CP, cc=make_cc(curvature=0.002), cs=make_cs(v_ego=15.0))
+          requested = {(dat[0] >> 4) & 0x7 for _, dat, _ in msgs(active, MSG_LateralMotionControl2)}
+          expected = 2 if (flag and mode == PrimaryLateralControl.angle) else 1
+          self.assertEqual(requested, {expected})
+          idle = drive(controller, CP, cc=make_cc(lat_active=False))
+          self.assertEqual({(dat[0] >> 4) & 0x7 for _, dat, _ in msgs(idle, MSG_LateralMotionControl2)}, {0})
+
   def test_lka_carries_the_shadow_only_in_angle_mode(self):
     for mode in PrimaryLateralControl:
       with self.subTest(mode=mode):

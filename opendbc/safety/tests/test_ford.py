@@ -691,7 +691,8 @@ class FordBluePilotSafetyHarness(unittest.TestCase):
   LATERAL_FREQUENCY = 20  # Hz
 
   def _lat_ctl_msg(self, enabled: bool, path_angle: float, path_offset: float = 0.0,
-                   curvature: float = 0.0, curvature_rate: float = 0.0, increment_timer: bool = True):
+                   curvature: float = 0.0, curvature_rate: float = 0.0, increment_timer: bool = True,
+                   extended: bool = False):
     if increment_timer:
       self.safety.set_timer(self.cnt_lat_ctl * int(1e6 / self.LATERAL_FREQUENCY))
       self.__class__.cnt_lat_ctl += 1
@@ -705,7 +706,7 @@ class FordBluePilotSafetyHarness(unittest.TestCase):
       }
       return self.packer.make_can_msg_safety("LateralMotionControl", 0, values)
     values = {
-      "LatCtl_D2_Rq": 1 if enabled else 0,
+      "LatCtl_D2_Rq": (2 if extended else 1) if enabled else 0,
       "LatCtlPathOffst_L_Actl": path_offset,
       "LatCtlPath_An_Actl": path_angle,
       "LatCtlCrv_NoRate2_Actl": curvature_rate,
@@ -750,6 +751,25 @@ class TestFordAngleControlSafetyBase(FordBluePilotSafetyHarness):
     for curvature_rate in (-0.001, -0.00005, 0.00005, 0.001):
       self._engage()
       self.assertFalse(self._tx(self._lat_ctl_msg(True, 0.0, curvature_rate=curvature_rate)))
+
+  def test_extended_mode_request_gets_every_check(self):
+    """LatCtl_D2_Rq = 2 (Extended, closed-course A/B only) is steering like 1: the same frames pass
+    and the same frames are blocked."""
+    if self.STEER_MESSAGE != MSG_LateralMotionControl2:
+      self.skipTest("only LateralMotionControl2 carries the Extended request")
+    roc = self._path_angle_roc(20.0)
+    for extended in (False, True):
+      with self.subTest(extended=extended):
+        self._engage(20.0)
+        self.assertTrue(self._tx(self._lat_ctl_msg(True, roc * 0.9, extended=extended)))
+        self._engage(20.0)
+        self.assertFalse(self._tx(self._lat_ctl_msg(True, roc * 3.0, extended=extended)))
+        self._engage(20.0)
+        self.assertFalse(self._tx(self._lat_ctl_msg(True, 0.0, curvature=0.01, extended=extended)))
+        self._engage(20.0)
+        self.safety.set_controls_allowed(False)
+        self.safety.set_controls_allowed_lateral(False)
+        self.assertFalse(self._tx(self._lat_ctl_msg(True, 0.0, extended=extended)))
 
   def test_path_angle_can_reach_the_full_dbc_range(self):
     """path_angle is the actuator in angle mode, so the whole signal range must be reachable one
