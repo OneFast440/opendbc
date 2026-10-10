@@ -87,6 +87,7 @@ class CarParamsSP:
     satObserver: bool = auto_field()
     deliveryCompensation: bool = auto_field()
     extendedModeTest: bool = auto_field()
+    curveLaneKeeping: bool = auto_field()
 
   @auto_dataclass
   class FordLongitudinalTuning:
@@ -192,6 +193,9 @@ class CarControlSP:
     laneLineLeftProb: float = auto_field()
     laneLineRightProb: float = auto_field()
     alertType: str = auto_field()
+    planLaneOffsetAhead: float = auto_field()
+    laneWidthAhead: float = auto_field()
+    laneLookahead: float = auto_field()
 
   @auto_dataclass
   class Param:

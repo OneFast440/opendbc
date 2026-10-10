@@ -331,3 +331,59 @@ class TestAngleModeCommandFidelity(unittest.TestCase):
     self.assertFalse(ctrl.human_turn_active)
     self.assertFalse(res.lat_inactive, "lateral was handed back despite the override being off")
     self.assertNotEqual(res.path_angle, 0.0, "no command while carControl still wants lateral")
+
+
+class TestCurveLaneKeeping(unittest.TestCase):
+  """The model plans an inside line through curves; curve lane keeping pulls it back toward the
+  lane centre. Curvature and the model's lateral axis share a sign here: negative is left."""
+
+  def _settle(self, desired=-0.003, offset=-0.6, v_ego=20.0, enabled=True, frames=200, pressed=False,
+              lane_change_state=0, prob=0.9, width=2.75, lookahead=30.0):
+    CP, CP_SP = angle_params(curve_lane_keeping=enabled)
+    lat = LateralAngleExt(CP, CP_SP)
+    cc_sp = make_cc_sp(model_curvature=desired, plan_lane_offset_ahead=offset, lane_width_ahead=width,
+                       lane_lookahead=lookahead, lane_line_left_prob=prob, lane_line_right_prob=prob,
+                       lane_change_state=lane_change_state)
+    for _ in range(frames):
+      lat.update(make_cc(), cc_sp, make_cs(v_ego=v_ego, yaw_rate=-desired * v_ego, steering_pressed=pressed),
+                 make_actuators(desired))
+    return lat.shadow_curvature - desired
+
+  def test_off_by_default(self):
+    self.assertEqual(self._settle(enabled=False), 0.0)
+
+  def test_inside_line_in_a_left_curve_is_pulled_outward(self):
+    """Left curve (negative), plan 0.6 m left of centre 30 m ahead: correct to the right, by the
+    absolute cap (2 * 0.4 / 30^2 would be 0.00089)."""
+    self.assertAlmostEqual(self._settle(), 0.0006, places=6)
+
+  def test_inside_line_in_a_right_curve_is_pulled_outward(self):
+    self.assertAlmostEqual(self._settle(desired=0.003, offset=0.6), -0.0006, places=6)
+
+  def test_the_model_keeps_its_line_inside_the_deadband(self):
+    self.assertAlmostEqual(self._settle(offset=-0.15), 0.0, places=9)
+
+  def test_never_more_than_a_share_of_the_turn(self):
+    self.assertAlmostEqual(self._settle(desired=-0.0012, offset=-0.8), 0.30 * 0.0012, places=6)
+
+  def test_nothing_on_straight_road(self):
+    """Straight-road behaviour, weave included, must not change."""
+    self.assertEqual(self._settle(desired=-0.0003, offset=-0.8), 0.0)
+
+  def test_nothing_without_trusted_lane_lines(self):
+    self.assertAlmostEqual(self._settle(prob=0.5), 0.0, places=9)
+    self.assertAlmostEqual(self._settle(width=4.5), 0.0, places=9)
+    self.assertAlmostEqual(self._settle(width=2.1), 0.0, places=9)
+    self.assertAlmostEqual(self._settle(lookahead=0.0), 0.0, places=9)
+
+  def test_driver_and_lane_change_have_the_lane(self):
+    self.assertAlmostEqual(self._settle(pressed=True), 0.0, places=9)
+    self.assertAlmostEqual(self._settle(lane_change_state=2), 0.0, places=9)
+
+  def test_nothing_at_low_speed(self):
+    self.assertAlmostEqual(self._settle(v_ego=8.0), 0.0, places=9)
+
+  def test_walks_in_rather_than_stepping(self):
+    one_frame = self._settle(frames=1)
+    self.assertGreater(one_frame, 0.0)
+    self.assertLess(one_frame, 0.0006 * 0.15)

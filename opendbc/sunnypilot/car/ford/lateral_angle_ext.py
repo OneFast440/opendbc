@@ -203,6 +203,27 @@ _BLIP_MAX_PATH_ANGLE = 0.10       # rad -- the pulse releases steering for 300 m
 # gentle, by what the planner asks for and by what the truck is actually doing, whichever is more.
 _PRESS_BLIP_MAX_LAT_ACCEL = 0.5   # m/s^2
 
+# Curve lane keeping. The driving model plans an inside line through curves: on eight logged
+# curves at 40-60 mph its own path sat 0.3-0.9 m inside the lane-line centre 20-60 m ahead,
+# while the truck itself was still centred. Following that plan faithfully, a 2.2 m wide truck in
+# a 3.6 m lane puts its inside tyres on the line. This trims the command toward the lane centre by
+# however far the plan's point _CLK_LOOKAHEAD_S ahead sits past a deadband, as the curvature that
+# would move that point there (2 * offset / distance^2), filtered, capped, and only in curves with
+# both lane lines trusted. On straight road it is exactly zero, so the straight-road behaviour,
+# weave included, is untouched. The lookahead point itself is measured in controlsd_ext.
+_CLK_DEADBAND_M = 0.2             # the model keeps this much of its own line
+_CLK_MAX_ABS = 0.0006             # 1/m; 0.24 m/s^2 at 20 m/s
+_CLK_MAX_REL = 0.30               # and never more than this share of the turn itself
+_CLK_CURVE_BP = [0.0005, 0.001]   # 1/m: off on straights, full in curves
+_CLK_CONFIDENCE_BP = [0.6, 0.8]   # lane-line probability
+# Lane width as the model reports it, which is narrower than the painted lane: 2.50-3.10 m (p5-p95,
+# median 2.73) over five logged highway segments. Much narrower or wider is a merge, a split or a
+# misread, and the centre between those lines is not somewhere to steer toward.
+_CLK_LANE_WIDTH_BP = [2.2, 2.4, 3.6, 4.2]   # m
+_CLK_LANE_WIDTH_V = [0.0, 1.0, 1.0, 0.0]
+_CLK_MIN_SPEED = 9.0              # m/s, where the deviation clip also starts
+_CLK_TAU_S = 0.5
+
 def _tuned(value: float, spec: tuple[float, float, float]) -> float:
   """Clamp a user tuning factor, falling back to the default when unset.
 
@@ -257,6 +278,9 @@ class LateralAngleExt:
     self.press_timer_s = 0.0
 
     self.lane_change = False
+
+    self.curve_lane_keeping = bool(tuning.curveLaneKeeping)
+    self.curve_lane_correction = 0.0
 
     # Delivered-vs-commanded saturation observer. Default off: this is live steering code and the
     # thresholds below are road-validated on one truck, not derived from the firmware.
@@ -374,6 +398,7 @@ class LateralAngleExt:
     stall-blip paths, which all put mode 0 on the wire."""
     self.path_angle_last = 0.0
     self.curvature_deviation_limited = False
+    self.curve_lane_correction = 0.0
     self._clear_saturation_observer()
     # Lane_Assist_Data1 carries the shadow at 33 Hz whenever angle mode is configured, and the
     # panda latches it from every such frame regardless of whether lateral is active. Parking it
@@ -484,6 +509,10 @@ class LateralAngleExt:
         requested_curvature *= lane_change_factor
         precision = 0
 
+    # *** curve lane keeping ***
+    requested_curvature += self._curve_lane_correction(CC_SP.fordLateral, desired_curvature, v_ego,
+                                                        CS.out.steeringPressed)
+
     # *** deviation clip ***
     # Clip to measured curvature +- CURVATURE_ERROR, the same clip the stock curvature path
     # applies. Without it kappa_cmd -- and therefore path_angle, and the shadow curvature the
@@ -562,6 +591,26 @@ class LateralAngleExt:
       precision_type=precision,
       lat_inactive=False,
     )
+
+  def _curve_lane_correction(self, lat, desired_curvature: float, v_ego: float, steering_pressed: bool) -> float:
+    """Curvature that pulls the model's planned line back toward the lane centre in a curve.
+
+    planLaneOffsetAhead is the plan's lateral position minus the lane-line centre at laneLookahead
+    metres, in the model's frame (right positive). Curvature here shares that sign (negative is a
+    left turn), so a plan to the right of centre is corrected with negative curvature."""
+    target = 0.0
+    if (self.curve_lane_keeping and not self.lane_change and not steering_pressed and v_ego >= _CLK_MIN_SPEED
+        and lat.laneLookahead > 0.0):
+      width_trust = float(interp(lat.laneWidthAhead, _CLK_LANE_WIDTH_BP, _CLK_LANE_WIDTH_V))
+      confidence = float(interp(min(lat.laneLineLeftProb, lat.laneLineRightProb), _CLK_CONFIDENCE_BP, [0.0, 1.0]))
+      in_curve = float(interp(abs(desired_curvature), _CLK_CURVE_BP, [0.0, 1.0]))
+      offset = lat.planLaneOffsetAhead
+      excess = (abs(offset) - _CLK_DEADBAND_M) if abs(offset) > _CLK_DEADBAND_M else 0.0
+      target = -(1.0 if offset > 0.0 else -1.0) * 2.0 * excess / lat.laneLookahead ** 2
+      cap = min(_CLK_MAX_ABS, _CLK_MAX_REL * abs(desired_curvature))
+      target = float(clip(target, -cap, cap)) * width_trust * confidence * in_curve
+    self.curve_lane_correction += _STEER_DT / (_CLK_TAU_S + _STEER_DT) * (target - self.curve_lane_correction)
+    return self.curve_lane_correction
 
   def _update_stall_detection(self, CS, desired_curvature: float, current_curvature: float) -> None:
     """Arm the mode-0 pulse when, hands-free, the command has led the measurement by more than

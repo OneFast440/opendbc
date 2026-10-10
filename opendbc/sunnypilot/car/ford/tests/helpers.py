@@ -59,7 +59,8 @@ def make_lead(status=False, d_rel=40.0, v_rel=0.0, v_lead=30.0):
 def make_cc_sp(model_curvature=0.0, lateral_delay=0.12, lane_change_state=0, lane_change_direction=0,
                model_curvatures=None, model_position_y=None, lane_line_left_y=-1.85,
                lane_line_right_y=1.85, lane_line_left_prob=0.9, lane_line_right_prob=0.9,
-               alert_type="", lead=None, send_button=SendButtonState.none):
+               alert_type="", lead=None, send_button=SendButtonState.none,
+               plan_lane_offset_ahead=0.0, lane_width_ahead=0.0, lane_lookahead=0.0):
   curvatures = model_curvatures if model_curvatures is not None else [model_curvature] * len(T_IDXS)
   position_y = model_position_y if model_position_y is not None else [0.0] * len(T_IDXS)
   return SimpleNamespace(
@@ -74,6 +75,9 @@ def make_cc_sp(model_curvature=0.0, lateral_delay=0.12, lane_change_state=0, lan
       laneLineLeftProb=lane_line_left_prob,
       laneLineRightProb=lane_line_right_prob,
       alertType=alert_type,
+      planLaneOffsetAhead=plan_lane_offset_ahead,
+      laneWidthAhead=lane_width_ahead,
+      laneLookahead=lane_lookahead,
     ),
     leadOne=lead if lead is not None else make_lead(),
     leadTwo=make_lead(),
@@ -119,6 +123,7 @@ def make_car_params(platform=CAR.FORD_F_150_MK14, mode=PrimaryLateralControl.sto
     lateral.satObserver = tuning.get('sat_observer', False)
     lateral.deliveryCompensation = tuning.get('delivery_compensation', False)
     lateral.extendedModeTest = tuning.get('extended_mode_test', False)
+    lateral.curveLaneKeeping = tuning.get('curve_lane_keeping', False)
     lateral.humanTurnDetection = tuning.get('human_turn_detection', True)
   elif mode == PrimaryLateralControl.curvature:
     lateral.humanTurnDetection = tuning.get('human_turn_detection', True)
