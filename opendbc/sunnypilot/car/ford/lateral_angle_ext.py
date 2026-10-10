@@ -59,11 +59,19 @@ _PATH_ANGLE_BLEND_RATIO = 0.50
 # So the blend fades out with how hard the truck is cornering or about to: the largest of the
 # planner's command, the truck's measured curvature and the model's prediction over the next
 # _BLEND_CURVE_HORIZON_S, as lateral acceleration. Looking ahead turns it off before turn-in;
-# measured keeps it off until the truck is actually straight again. Below the first breakpoint
+# measured keeps it off until the truck is actually straight again. Below the first breakpoints
 # nothing changes, and lane changes keep the blend whatever their lateral acceleration. Replaying
 # the alert logic on the trip with this gate: 11 of 29 alerts still fire, against 10 with no blend
 # at all, and 29 with the blend everywhere.
+#
+# Lateral acceleration alone misses sharp turns at low speed: a 25 m radius at 8.5 mph is only
+# 0.58 m/s^2. On a logged left turn there the blend held the path angle back by 0.95 s at 90% of
+# the turn (5.54 s from turn-in against 4.59 s without it), on top of 4.4 s for the planner to ask
+# for it and 0.8 s for the PSCM to finish winding in. So the blend also fades with curvature
+# itself. Above about 20 mph the lateral acceleration breakpoints already cover these radii, so
+# this only reaches low-speed turns, and straight road is untouched either way.
 _BLEND_CURVE_LAT_ACCEL_BP = [0.4, 0.8]   # m/s^2: full blend below, none above
+_BLEND_CURVE_KAPPA_BP = [0.005, 0.010]   # 1/m (200 m to 100 m radius): full blend below, none above
 _BLEND_CURVE_HORIZON_S = 2.0
 
 # Variable lookup time (VLT): how far ahead the model curvature is sampled for the blend.
@@ -493,8 +501,9 @@ class LateralAngleExt:
     if not self.lane_change:
       ahead = max((abs(k) for t, k in zip(T_IDXS, model_curvatures, strict=True) if t <= _BLEND_CURVE_HORIZON_S),
                   default=0.0) if have_model else 0.0
-      cornering = max(abs(desired_curvature), abs(current_curvature), ahead) * v_ego ** 2
-      blend *= float(interp(cornering, _BLEND_CURVE_LAT_ACCEL_BP, [1.0, 0.0]))
+      corner_kappa = max(abs(desired_curvature), abs(current_curvature), ahead)
+      blend *= min(float(interp(corner_kappa * v_ego ** 2, _BLEND_CURVE_LAT_ACCEL_BP, [1.0, 0.0])),
+                   float(interp(corner_kappa, _BLEND_CURVE_KAPPA_BP, [1.0, 0.0])))
     requested_curvature = predicted_curvature * blend + desired_curvature * (1.0 - blend)
     self.desired_curvature_last = desired_curvature
 

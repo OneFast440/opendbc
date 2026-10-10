@@ -273,6 +273,14 @@ class TestLateralAngleExt(unittest.TestCase):
     """In a curve the prediction is where the truck already is; blending it in is lag."""
     self.assertAlmostEqual(self._shadow(0.003, 0.003, v_ego=25.0, model_curvatures=[0.0] * 33), 0.003, places=9)
 
+  def test_no_blend_in_a_sharp_low_speed_turn(self):
+    """25 m radius at 9 mph is under 0.6 m/s^2, so lateral acceleration alone would keep half the
+    blend; on a logged turn that cost 0.95 s of wind-up. Curvature turns it off."""
+    self.assertAlmostEqual(self._shadow(0.04, 0.04, v_ego=4.0, model_curvatures=[0.0] * 33), 0.04, places=9)
+
+  def test_low_speed_gentle_curve_keeps_the_blend(self):
+    self.assertAlmostEqual(self._shadow(0.002, 0.002, v_ego=4.0, model_curvatures=[0.004] * 33), 0.003, places=9)
+
   def test_blend_off_before_a_curve_the_model_sees_coming(self):
     """Straight now, curve ahead: the gate opens before turn-in, so turn-in starts on time."""
     ramp = [0.0002 + 0.001 * t for t in T_IDXS]   # 2 m/s^2 within the 2 s horizon at 30 m/s
