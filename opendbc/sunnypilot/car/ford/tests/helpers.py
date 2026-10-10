@@ -124,6 +124,7 @@ def make_car_params(platform=CAR.FORD_F_150_MK14, mode=PrimaryLateralControl.sto
     lateral.deliveryCompensation = tuning.get('delivery_compensation', False)
     lateral.extendedModeTest = tuning.get('extended_mode_test', False)
     lateral.curveLaneKeeping = tuning.get('curve_lane_keeping', False)
+    lateral.turnInLead = tuning.get('turn_in_lead', 0.0)
     lateral.humanTurnDetection = tuning.get('human_turn_detection', True)
   elif mode == PrimaryLateralControl.curvature:
     lateral.humanTurnDetection = tuning.get('human_turn_detection', True)

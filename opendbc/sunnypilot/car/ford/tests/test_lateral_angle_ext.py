@@ -387,3 +387,58 @@ class TestCurveLaneKeeping(unittest.TestCase):
     one_frame = self._settle(frames=1)
     self.assertGreater(one_frame, 0.0)
     self.assertLess(one_frame, 0.0006 * 0.15)
+
+
+class TestTurnInLead(unittest.TestCase):
+  """Turn-in lead adds turnInLead seconds of carControl's rate of change: sooner into and out of a
+  curve, nothing extra once the curve is steady. Gain would also have raised the steady state."""
+
+  def _run(self, curvatures, lead=0.4, v_ego=20.0, pressed=False, lane_change_state=0):
+    CP, CP_SP = angle_params(turn_in_lead=lead)
+    lat = LateralAngleExt(CP, CP_SP)
+    for k in curvatures:
+      # the model agrees with the planner and the truck is on it, so neither the blend nor the
+      # deviation clip moves the command, and what is left is the lead
+      lat.update(make_cc(), make_cc_sp(model_curvature=k, lane_change_state=lane_change_state),
+                 make_cs(v_ego=v_ego, yaw_rate=-k * v_ego, steering_pressed=pressed), make_actuators(k))
+    return lat.shadow_curvature - curvatures[-1]
+
+  RAMP = [0.002 + 0.002 * i * STEER_DT for i in range(30)]   # 0.002 1/m per s for 1.5 s
+
+  def test_off_by_default(self):
+    self.assertEqual(self._run(self.RAMP, lead=0.0), 0.0)
+
+  def test_leads_a_turn_in_by_its_rate(self):
+    self.assertAlmostEqual(self._run(self.RAMP), 0.4 * 0.002, delta=0.4 * 0.002 * 0.02)
+
+  def test_nothing_extra_in_a_steady_curve(self):
+    """The whole point against raising the gain: the endpoint is what carControl asked for."""
+    self.assertAlmostEqual(self._run(self.RAMP + [self.RAMP[-1]] * 40), 0.0, places=6)
+
+  def test_releases_sooner_too(self):
+    self.assertLess(self._run(self.RAMP[::-1]), -0.4 * 0.002 * 0.9)
+
+  def test_never_more_than_half_the_curvature_it_leads(self):
+    """Below 9 m/s, where the deviation clip does not apply, the cap is what holds it."""
+    steep = [0.001 + 0.02 * i * STEER_DT for i in range(10)]
+    self.assertAlmostEqual(self._run(steep, lead=0.6, v_ego=8.0), 0.5 * steep[-1], places=9)
+
+  def test_the_panda_deviation_band_still_binds_above_9_ms(self):
+    steep = [0.001 + 0.02 * i * STEER_DT for i in range(10)]
+    self.assertAlmostEqual(self._run(steep, lead=0.6), CarControllerParams.CURVATURE_ERROR, places=9)
+
+  def test_nothing_on_straight_road(self):
+    self.assertEqual(self._run([0.0001 * i * STEER_DT for i in range(30)]), 0.0)
+
+  def test_driver_and_lane_change_have_the_wheel(self):
+    self.assertEqual(self._run(self.RAMP, pressed=True), 0.0)
+    self.assertEqual(self._run(self.RAMP, lane_change_state=2), 0.0)
+
+  def test_setting_is_clamped(self):
+    from opendbc.car import structs
+    from opendbc.sunnypilot.car.interfaces import _initialize_ford
+    CP, CP_SP = angle_params()
+    for raw, expected in (("0.9", 0.6), ("0.3", 0.3), ("0.0", 0.0), (None, 0.0)):
+      CP_SP = structs.CarParamsSP()
+      _initialize_ford(CP, CP_SP, {"FordPrefLateralControl": "2", "FordTurnInLead_ang": raw})
+      self.assertAlmostEqual(CP_SP.fordLateralTuning.turnInLead, expected, places=6)

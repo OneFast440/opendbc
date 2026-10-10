@@ -88,6 +88,7 @@ class CarParamsSP:
     deliveryCompensation: bool = auto_field()
     extendedModeTest: bool = auto_field()
     curveLaneKeeping: bool = auto_field()
+    turnInLead: float = auto_field()
 
   @auto_dataclass
   class FordLongitudinalTuning:

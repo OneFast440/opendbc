@@ -39,6 +39,7 @@ from opendbc.sunnypilot.car.ford.values_ext import (
   LANE_CHANGE_FACTOR_RANGE,
   LOW_SPEED_FACTOR_RANGE,
   T_IDXS,
+  TURN_IN_LEAD_RANGE,
   platform_path_angle_gains,
 )
 
@@ -224,6 +225,19 @@ _CLK_LANE_WIDTH_V = [0.0, 1.0, 1.0, 0.0]
 _CLK_MIN_SPEED = 9.0              # m/s, where the deviation clip also starts
 _CLK_TAU_S = 0.5
 
+# Turn-in lead. Raising the speed factors makes the truck reach a curve's curvature sooner, but it
+# also holds the curve tighter than asked for as long as it lasts: on a logged 8.5 mph left turn a
+# Low Speed Factor of 1.3 reached 90% of the needed path angle 0.66 s sooner and then held 130% of
+# it. A lead on the rate of change gets most of that sooner without the endpoint: the command is
+# carControl's curvature plus turnInLead seconds of its own rate of change, which is zero in a
+# steady curve. It acts on unwinding too, so the release also comes sooner. The rate is filtered
+# so 20 Hz steps in the plan do not become steering, and the lead is capped at a share of the
+# curvature it leads so it can never flip the command or invent a turn on straight road. It is in
+# addition to the planner's own delay compensation, which is why it is a setting and off by default.
+_LEAD_RATE_TAU_S = 0.15
+_LEAD_MAX_REL = 0.5               # of |carControl curvature|
+_LEAD_CURVE_BP = [0.0005, 0.001]  # 1/m: off on straights, full in curves
+
 def _tuned(value: float, spec: tuple[float, float, float]) -> float:
   """Clamp a user tuning factor, falling back to the default when unset.
 
@@ -281,6 +295,10 @@ class LateralAngleExt:
 
     self.curve_lane_keeping = bool(tuning.curveLaneKeeping)
     self.curve_lane_correction = 0.0
+
+    self.turn_in_lead = _tuned(tuning.turnInLead, TURN_IN_LEAD_RANGE)
+    self.lead_rate = 0.0
+    self.lead_curvature_last: float | None = None
 
     # Delivered-vs-commanded saturation observer. Default off: this is live steering code and the
     # thresholds below are road-validated on one truck, not derived from the firmware.
@@ -399,6 +417,8 @@ class LateralAngleExt:
     self.path_angle_last = 0.0
     self.curvature_deviation_limited = False
     self.curve_lane_correction = 0.0
+    self.lead_rate = 0.0
+    self.lead_curvature_last = None
     self._clear_saturation_observer()
     # Lane_Assist_Data1 carries the shadow at 33 Hz whenever angle mode is configured, and the
     # panda latches it from every such frame regardless of whether lateral is active. Parking it
@@ -509,6 +529,9 @@ class LateralAngleExt:
         requested_curvature *= lane_change_factor
         precision = 0
 
+    # *** turn-in lead ***
+    requested_curvature += self._turn_in_lead(desired_curvature, CS.out.steeringPressed)
+
     # *** curve lane keeping ***
     requested_curvature += self._curve_lane_correction(CC_SP.fordLateral, desired_curvature, v_ego,
                                                         CS.out.steeringPressed)
@@ -591,6 +614,17 @@ class LateralAngleExt:
       precision_type=precision,
       lat_inactive=False,
     )
+
+  def _turn_in_lead(self, desired_curvature: float, steering_pressed: bool) -> float:
+    """turnInLead seconds of carControl's filtered rate of change, toward wherever it is heading."""
+    rate = 0.0 if self.lead_curvature_last is None else (desired_curvature - self.lead_curvature_last) / _STEER_DT
+    self.lead_curvature_last = desired_curvature
+    self.lead_rate += _STEER_DT / (_LEAD_RATE_TAU_S + _STEER_DT) * (rate - self.lead_rate)
+    if self.turn_in_lead <= 0.0 or self.lane_change or steering_pressed:
+      return 0.0
+    cap = _LEAD_MAX_REL * abs(desired_curvature)
+    in_curve = float(interp(abs(desired_curvature), _LEAD_CURVE_BP, [0.0, 1.0]))
+    return float(clip(self.turn_in_lead * self.lead_rate, -cap, cap)) * in_curve
 
   def _curve_lane_correction(self, lat, desired_curvature: float, v_ego: float, steering_pressed: bool) -> float:
     """Curvature that pulls the model's planned line back toward the lane centre in a curve.
