@@ -13,6 +13,7 @@ from opendbc.sunnypilot.car.ford.tests.helpers import make_actuators, make_car_p
 from opendbc.sunnypilot.car.ford.values_ext import (
   FORD_DBC_PATH_ANGLE_MAX,
   FORD_DBC_PATH_ANGLE_MIN,
+  T_IDXS,
   PrimaryLateralControl,
 )
 
@@ -248,18 +249,44 @@ class TestLateralAngleExt(unittest.TestCase):
     # precision drops to Comfortable during a lane change in the change direction
     self.assertEqual(base.update(*args).precision_type, 0)
 
-  def test_command_is_carcontrol_not_the_model_prediction(self):
-    """The model's predicted curvature is the truck's own trajectory, roughly where it already is.
-    Blending it in (BluePilot's 50/50) delayed every command by 0.23 s on logged highway curves.
-    Whatever the prediction says, the command is carControl's curvature."""
-    def shadow(model_curvature):
-      lat = LateralAngleExt(self.CP, self.CP_SP)
-      for _ in range(40):
-        lat.update(make_cc(), make_cc_sp(model_curvature=model_curvature), make_cs(v_ego=25.0, yaw_rate=-0.003 * 25.0),
-                   make_actuators(0.003))
-      return lat.shadow_curvature
-    self.assertAlmostEqual(shadow(0.0), 0.003, places=9)
-    self.assertAlmostEqual(shadow(0.006), 0.003, places=9)
+  def test_model_blend_moves_the_command(self):
+    """The model's predicted curvature is blended into the planner's, so a model that disagrees
+    with the planner changes the command."""
+    planner_only = LateralAngleExt(self.CP, self.CP_SP).update(
+      make_cc(), make_cc_sp(model_curvature=0.0), make_cs(v_ego=12.0), make_actuators(0.001)).path_angle
+    with_model = LateralAngleExt(self.CP, self.CP_SP).update(
+      make_cc(), make_cc_sp(model_curvature=0.003), make_cs(v_ego=12.0), make_actuators(0.001)).path_angle
+    self.assertGreater(with_model, planner_only)
+
+  def _shadow(self, planner, measured, v_ego=30.0, model_curvatures=None, **cc_sp):
+    """kappa_cmd after one frame: the blend and the gate, before the soft rate limit."""
+    lat = LateralAngleExt(self.CP, self.CP_SP)
+    lat.update(make_cc(), make_cc_sp(model_curvatures=model_curvatures, **cc_sp),
+               make_cs(v_ego=v_ego, yaw_rate=-measured * v_ego), make_actuators(planner))
+    return lat.shadow_curvature
+
+  def test_straight_road_blend_is_unchanged(self):
+    """Under 0.4 m/s^2 everywhere the blend is BluePilot's 50/50, which damps straight-road weave."""
+    self.assertAlmostEqual(self._shadow(0.0002, 0.0002, model_curvatures=[0.0003] * 33), 0.00025, places=9)
+
+  def test_no_blend_in_a_curve(self):
+    """In a curve the prediction is where the truck already is; blending it in is lag."""
+    self.assertAlmostEqual(self._shadow(0.003, 0.003, v_ego=25.0, model_curvatures=[0.0] * 33), 0.003, places=9)
+
+  def test_blend_off_before_a_curve_the_model_sees_coming(self):
+    """Straight now, curve ahead: the gate opens before turn-in, so turn-in starts on time."""
+    ramp = [0.0002 + 0.001 * t for t in T_IDXS]   # 2 m/s^2 within the 2 s horizon at 30 m/s
+    self.assertAlmostEqual(self._shadow(0.0002, 0.0002, model_curvatures=ramp), 0.0002, places=9)
+
+  def test_blend_stays_off_until_the_truck_is_straight(self):
+    """Unwinding: the planner and the model have let go, the truck is still turning. Blending
+    then would hold the command in the curve, which is the slow unwind."""
+    self.assertAlmostEqual(self._shadow(0.0002, 0.0016, v_ego=25.0, model_curvatures=[0.0003] * 33), 0.0002, places=9)
+
+  def test_lane_change_keeps_the_blend(self):
+    self.assertAlmostEqual(self._shadow(0.001, 0.0005, model_curvatures=[0.0] * 33, lane_change_state=1), 0.0005,
+                           places=9)
+    self.assertAlmostEqual(self._shadow(0.001, 0.0005, model_curvatures=[0.0] * 33), 0.001, places=9)
 
   def test_missing_model_data_is_survivable(self):
     """carControlSP can arrive before modelV2 has been seen; the planner command must still work."""
