@@ -75,13 +75,14 @@ class TestLateralAngleExt(unittest.TestCase):
   def test_path_angle_tracks_kappa_times_speed(self):
     """The whole point of angle control: path_angle is kappa * v_ego * gain, so it grows with both
     curvature and speed rather than being a curvature the PSCM filters."""
-    self.lat.update(make_cc(), make_cc_sp(), make_cs(v_ego=30.0), make_actuators(0.0))
-    small = self.lat.update(make_cc(), make_cc_sp(), make_cs(v_ego=30.0), make_actuators(0.0005)).path_angle
+    def settled(kappa):
+      lat = LateralAngleExt(self.CP, self.CP_SP)
+      for _ in range(20):   # past the soft rate limit
+        out = lat.update(make_cc(), make_cc_sp(), make_cs(v_ego=30.0, yaw_rate=-kappa * 30.0), make_actuators(kappa))
+      return out.path_angle
+    small = settled(0.0005)
     self.assertGreater(small, 0.0)
-
-    self.lat.path_angle_last = 0.0
-    bigger = self.lat.update(make_cc(), make_cc_sp(), make_cs(v_ego=30.0), make_actuators(0.001)).path_angle
-    self.assertGreater(bigger, small)
+    self.assertGreater(settled(0.001), small)
 
     # sign follows the commanded curvature
     self.lat.path_angle_last = 0.0
@@ -247,14 +248,18 @@ class TestLateralAngleExt(unittest.TestCase):
     # precision drops to Comfortable during a lane change in the change direction
     self.assertEqual(base.update(*args).precision_type, 0)
 
-  def test_model_blend_moves_the_command(self):
-    """The model's predicted curvature is blended into the planner's, so a model that disagrees
-    with the planner changes the command."""
-    planner_only = LateralAngleExt(self.CP, self.CP_SP).update(
-      make_cc(), make_cc_sp(model_curvature=0.0), make_cs(v_ego=12.0), make_actuators(0.001)).path_angle
-    with_model = LateralAngleExt(self.CP, self.CP_SP).update(
-      make_cc(), make_cc_sp(model_curvature=0.003), make_cs(v_ego=12.0), make_actuators(0.001)).path_angle
-    self.assertGreater(with_model, planner_only)
+  def test_command_is_carcontrol_not_the_model_prediction(self):
+    """The model's predicted curvature is the truck's own trajectory, roughly where it already is.
+    Blending it in (BluePilot's 50/50) delayed every command by 0.23 s on logged highway curves.
+    Whatever the prediction says, the command is carControl's curvature."""
+    def shadow(model_curvature):
+      lat = LateralAngleExt(self.CP, self.CP_SP)
+      for _ in range(40):
+        lat.update(make_cc(), make_cc_sp(model_curvature=model_curvature), make_cs(v_ego=25.0, yaw_rate=-0.003 * 25.0),
+                   make_actuators(0.003))
+      return lat.shadow_curvature
+    self.assertAlmostEqual(shadow(0.0), 0.003, places=9)
+    self.assertAlmostEqual(shadow(0.006), 0.003, places=9)
 
   def test_missing_model_data_is_survivable(self):
     """carControlSP can arrive before modelV2 has been seen; the planner command must still work."""
