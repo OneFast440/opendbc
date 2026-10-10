@@ -48,32 +48,6 @@ _STEER_DT = CarControllerParams.STEER_STEP * DT_CTRL  # 20 Hz lateral tick
 # fleet data. 0 = planner only, 1 = model only.
 _PATH_ANGLE_BLEND_RATIO = 0.50
 
-# The blend is for straight road and nothing else. The predicted curvature is the truck's own
-# trajectory, roughly where it already is, so mixing it in is state feedback: on a straight it damps
-# the weave a pure planner command produces, and in a curve it is lag. Over 30 steer-saturated
-# alerts on a 151-segment trip the blended term ran in phase with the truck's measured curvature and
-# 0.44 s behind the planner, which put the wire 0.19 s behind carControl on turn-in and 0.26 s
-# behind on the way out (the model still sees the curve after the planner has started unwinding).
-# The PSCM itself took 0.26-0.28 s either way, and delivered 1.00 in steady state.
-#
-# So the blend fades out with how hard the truck is cornering or about to: the largest of the
-# planner's command, the truck's measured curvature and the model's prediction over the next
-# _BLEND_CURVE_HORIZON_S, as lateral acceleration. Looking ahead turns it off before turn-in;
-# measured keeps it off until the truck is actually straight again. Below the first breakpoints
-# nothing changes, and lane changes keep the blend whatever their lateral acceleration. Replaying
-# the alert logic on the trip with this gate: 11 of 29 alerts still fire, against 10 with no blend
-# at all, and 29 with the blend everywhere.
-#
-# Lateral acceleration alone misses sharp turns at low speed: a 25 m radius at 8.5 mph is only
-# 0.58 m/s^2. On a logged left turn there the blend held the path angle back by 0.95 s at 90% of
-# the turn (5.54 s from turn-in against 4.59 s without it), on top of 4.4 s for the planner to ask
-# for it and 0.8 s for the PSCM to finish winding in. So the blend also fades with curvature
-# itself. Above about 20 mph the lateral acceleration breakpoints already cover these radii, so
-# this only reaches low-speed turns, and straight road is untouched either way.
-_BLEND_CURVE_LAT_ACCEL_BP = [0.4, 0.8]   # m/s^2: full blend below, none above
-_BLEND_CURVE_KAPPA_BP = [0.005, 0.010]   # 1/m (200 m to 100 m radius): full blend below, none above
-_BLEND_CURVE_HORIZON_S = 2.0
-
 # Variable lookup time (VLT): how far ahead the model curvature is sampled for the blend.
 #   t_lookup = t_base + t_extra_max * speed_factor(v) * kappa_factor(|kappa|)
 # t_base tracks the planner's own pre-compensation floor. The extra lookahead collapses toward
@@ -465,8 +439,6 @@ class LateralAngleExt:
     self.stall_blip_active = False
 
     desired_curvature = float(actuators.curvature)
-    current_curvature = get_current_curvature(CS)
-    self.lane_change = CC_SP.fordLateral.laneChangeState in (1, 2, 3)
 
     # *** variable lookup time ***
     t_base = float(clip(CC_SP.fordLateral.lateralDelay, _VLT_DELAY_MIN, _VLT_DELAY_MAX)) + _DT_MDL
@@ -498,16 +470,11 @@ class LateralAngleExt:
     desired_falling = abs(desired_curvature) < abs(self.desired_curvature_last) - _EXIT_DESIRED_FALLING
     on_exit = not kappa_entering and (saturated or desired_falling)
     blend = _PATH_ANGLE_BLEND_RATIO * _EXIT_BLEND_SCALE if on_exit else _PATH_ANGLE_BLEND_RATIO
-    if not self.lane_change:
-      ahead = max((abs(k) for t, k in zip(T_IDXS, model_curvatures, strict=True) if t <= _BLEND_CURVE_HORIZON_S),
-                  default=0.0) if have_model else 0.0
-      corner_kappa = max(abs(desired_curvature), abs(current_curvature), ahead)
-      blend *= min(float(interp(corner_kappa * v_ego ** 2, _BLEND_CURVE_LAT_ACCEL_BP, [1.0, 0.0])),
-                   float(interp(corner_kappa, _BLEND_CURVE_KAPPA_BP, [1.0, 0.0])))
     requested_curvature = predicted_curvature * blend + desired_curvature * (1.0 - blend)
     self.desired_curvature_last = desired_curvature
 
     # *** lane change ***
+    self.lane_change = CC_SP.fordLateral.laneChangeState in (1, 2, 3)
     precision = 1
     if self.lane_change:
       lane_change_factor = float(interp(v_ego, _LANE_CHANGE_SPEED_BP,
@@ -525,6 +492,7 @@ class LateralAngleExt:
     # on a genuine divergence. Clipping the steering intent itself, not just the reported value,
     # is what keeps that check meaningful.
     kappa_cmd = float(requested_curvature)
+    current_curvature = get_current_curvature(CS)
     self.curvature_deviation_limited = False
     if v_ego > 9:
       kappa_pre_clip = kappa_cmd

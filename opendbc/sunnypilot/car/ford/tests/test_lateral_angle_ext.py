@@ -13,7 +13,6 @@ from opendbc.sunnypilot.car.ford.tests.helpers import make_actuators, make_car_p
 from opendbc.sunnypilot.car.ford.values_ext import (
   FORD_DBC_PATH_ANGLE_MAX,
   FORD_DBC_PATH_ANGLE_MIN,
-  T_IDXS,
   PrimaryLateralControl,
 )
 
@@ -76,14 +75,13 @@ class TestLateralAngleExt(unittest.TestCase):
   def test_path_angle_tracks_kappa_times_speed(self):
     """The whole point of angle control: path_angle is kappa * v_ego * gain, so it grows with both
     curvature and speed rather than being a curvature the PSCM filters."""
-    def settled(kappa):
-      lat = LateralAngleExt(self.CP, self.CP_SP)
-      for _ in range(20):   # past the soft rate limit
-        out = lat.update(make_cc(), make_cc_sp(), make_cs(v_ego=30.0, yaw_rate=-kappa * 30.0), make_actuators(kappa))
-      return out.path_angle
-    small = settled(0.0005)
+    self.lat.update(make_cc(), make_cc_sp(), make_cs(v_ego=30.0), make_actuators(0.0))
+    small = self.lat.update(make_cc(), make_cc_sp(), make_cs(v_ego=30.0), make_actuators(0.0005)).path_angle
     self.assertGreater(small, 0.0)
-    self.assertGreater(settled(0.001), small)
+
+    self.lat.path_angle_last = 0.0
+    bigger = self.lat.update(make_cc(), make_cc_sp(), make_cs(v_ego=30.0), make_actuators(0.001)).path_angle
+    self.assertGreater(bigger, small)
 
     # sign follows the commanded curvature
     self.lat.path_angle_last = 0.0
@@ -257,44 +255,6 @@ class TestLateralAngleExt(unittest.TestCase):
     with_model = LateralAngleExt(self.CP, self.CP_SP).update(
       make_cc(), make_cc_sp(model_curvature=0.003), make_cs(v_ego=12.0), make_actuators(0.001)).path_angle
     self.assertGreater(with_model, planner_only)
-
-  def _shadow(self, planner, measured, v_ego=30.0, model_curvatures=None, **cc_sp):
-    """kappa_cmd after one frame: the blend and the gate, before the soft rate limit."""
-    lat = LateralAngleExt(self.CP, self.CP_SP)
-    lat.update(make_cc(), make_cc_sp(model_curvatures=model_curvatures, **cc_sp),
-               make_cs(v_ego=v_ego, yaw_rate=-measured * v_ego), make_actuators(planner))
-    return lat.shadow_curvature
-
-  def test_straight_road_blend_is_unchanged(self):
-    """Under 0.4 m/s^2 everywhere the blend is BluePilot's 50/50, which damps straight-road weave."""
-    self.assertAlmostEqual(self._shadow(0.0002, 0.0002, model_curvatures=[0.0003] * 33), 0.00025, places=9)
-
-  def test_no_blend_in_a_curve(self):
-    """In a curve the prediction is where the truck already is; blending it in is lag."""
-    self.assertAlmostEqual(self._shadow(0.003, 0.003, v_ego=25.0, model_curvatures=[0.0] * 33), 0.003, places=9)
-
-  def test_no_blend_in_a_sharp_low_speed_turn(self):
-    """25 m radius at 9 mph is under 0.6 m/s^2, so lateral acceleration alone would keep half the
-    blend; on a logged turn that cost 0.95 s of wind-up. Curvature turns it off."""
-    self.assertAlmostEqual(self._shadow(0.04, 0.04, v_ego=4.0, model_curvatures=[0.0] * 33), 0.04, places=9)
-
-  def test_low_speed_gentle_curve_keeps_the_blend(self):
-    self.assertAlmostEqual(self._shadow(0.002, 0.002, v_ego=4.0, model_curvatures=[0.004] * 33), 0.003, places=9)
-
-  def test_blend_off_before_a_curve_the_model_sees_coming(self):
-    """Straight now, curve ahead: the gate opens before turn-in, so turn-in starts on time."""
-    ramp = [0.0002 + 0.001 * t for t in T_IDXS]   # 2 m/s^2 within the 2 s horizon at 30 m/s
-    self.assertAlmostEqual(self._shadow(0.0002, 0.0002, model_curvatures=ramp), 0.0002, places=9)
-
-  def test_blend_stays_off_until_the_truck_is_straight(self):
-    """Unwinding: the planner and the model have let go, the truck is still turning. Blending
-    then would hold the command in the curve, which is the slow unwind."""
-    self.assertAlmostEqual(self._shadow(0.0002, 0.0016, v_ego=25.0, model_curvatures=[0.0003] * 33), 0.0002, places=9)
-
-  def test_lane_change_keeps_the_blend(self):
-    self.assertAlmostEqual(self._shadow(0.001, 0.0005, model_curvatures=[0.0] * 33, lane_change_state=1), 0.0005,
-                           places=9)
-    self.assertAlmostEqual(self._shadow(0.001, 0.0005, model_curvatures=[0.0] * 33), 0.001, places=9)
 
   def test_missing_model_data_is_survivable(self):
     """carControlSP can arrive before modelV2 has been seen; the planner command must still work."""
