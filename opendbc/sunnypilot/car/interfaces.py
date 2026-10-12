@@ -26,7 +26,6 @@ from opendbc.sunnypilot.car.ford.values_ext import (
   LANE_CHANGE_FACTOR_RANGE,
   LANE_POSITIONING_GAIN_RANGE,
   LOW_SPEED_FACTOR_RANGE,
-  TURN_IN_LEAD_RANGE,
   PATH_OFFSET_RANGE,
   PrimaryLateralControl,
 )
@@ -218,8 +217,6 @@ def _initialize_ford(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_d
     # Closed-course A/B only: request the PSCM's Extended path-following mode instead of Limited.
     # The param clears itself when the car goes offroad, so this lasts one drive.
     lateral.extendedModeTest = _bool_param(params_dict, "FordLatCtlExtendedTest")
-    lateral.curveLaneKeeping = _bool_param(params_dict, "FordCurveLaneKeeping_ang")
-    lateral.turnInLead = _clamp_tuning(params_dict.get("FordTurnInLead_ang"), TURN_IN_LEAD_RANGE)
     # Shared with curvature mode. Angle mode used to hard-wire this on, so the setting only ever
     # controlled curvature mode; reading it here is what makes the toggle mean what it says in
     # both. Same default, so nothing changes for anyone who has not chosen.
