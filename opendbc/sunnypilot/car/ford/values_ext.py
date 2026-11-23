@@ -160,13 +160,19 @@ PSCM_FAULT_THRESHOLDS = (0.73, 7.0, 19.0, 20.0)
 # the firmware's own confirmation that `path_angle = kappa * v_ego * gain` in lateral_angle_ext is
 # the right shape: the gain absorbs the lookahead time and the per-platform compensation.
 PSCM_ANGLE_FROM_KAPPA_V = 572.95776e-6
-# ramp_type and precision_type do not retune the actuator in Limited mode: every consumer we read
-# uses fixed cal (slew above, deadband above), and the 0-3 enum that looked like a received
-# ramp_type (0xFEBE4916) is an outbound status the PSCM transmits, packed with a rolling counter
-# and checksum by FUN_000b1c96. Limited vs Extended is selected internally by FUN_000a7204 from
-# two RTE mode-condition flags, not from the LatCtl_D2_Rq we send, so Extended is not reachable
-# from the wire. We keep sending the same values we always have; nothing should be tuned on them.
-PSCM_RAMP_PRECISION_INERT_IN_LIMITED = True
+# Corrected 2026-11: ramp_type and LatCtl_D2_Rq are not inert. This program's lane-centering library
+# (ML3V-14D003-BC carries the 2021 BA level's library instruction for instruction) has since been run
+# on its own code in an emulator:
+# - The ramp_type in the frame that carries LatCtl_D2_Rq = 0 sets how fast the module lets go of its
+#   torque on every disengage. The ramp_type in the steering frames sets the module's own ramp-out
+#   after a bad frame or a fault. The rate for each type is in the data file (14D007, not read for
+#   BC): 7 / 7 / 10 / 50 Nm/s for types 0-3 on the 2021 F-150 file used as a stand-in. Type 3 is
+#   50 Nm/s in every F-150 data file held.
+# - LatCtl_D2_Rq selects the mode: 1 Limited, 2 Extended (its own torque limit, also in the data
+#   file), 0 or 3 none. A change between 1 and 2 while steering takes effect only after one frame of 0.
+# - precision_type acts on the preview time through a data-file weight, 0 in the stand-in.
+# The values we send are unchanged. Which release a driver should get is a tuning choice, not a fact
+# of the firmware.
 # The PSCM broadcasts LatCtlLim_D_Stat on Lane_Assist_Data3_FD1 (0x3CC), but on CAN FD in angle
 # mode it does not fire even while the module is attenuating delivery. That is why saturation has
 # to be observed from delivered-vs-commanded motion rather than read off the bus.
