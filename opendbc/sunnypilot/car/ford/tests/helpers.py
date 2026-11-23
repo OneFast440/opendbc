@@ -130,6 +130,7 @@ def make_car_params(platform=CAR.FORD_F_150_MK14, mode=PrimaryLateralControl.sto
     lateral.pathOffset = tuning.get('path_offset', 0.0)
     lateral.customProfile = tuning.get('custom_profile', 0)
     lateral.lanePositioningGain = tuning.get('lane_positioning_gain', 3.0)
+  lateral.releaseRampType = tuning.get('release_ramp_type', 0)
 
   CP_SP.fordLongitudinalTuning.followControl = tuning.get('follow_control', True)
   CP_SP.fordLongitudinalTuning.downhillCompensation = tuning.get('downhill_compensation', True)
@@ -144,7 +145,8 @@ def make_car_controller(platform=CAR.FORD_F_150_MK14, **kwargs):
 
 
 def unpack_lat_ctl(addr, dat):
-  """The four polynomial signals in raw CAN units, exactly as safety/modes/ford.h reads them."""
+  """The four polynomial signals in raw CAN units, exactly as safety/modes/ford.h reads them, plus
+  the ramp type, which the panda does not read."""
   if addr == MSG_LateralMotionControl:
     return {
       'enabled': ((dat[4] >> 2) & 0x7) != 0,
@@ -153,6 +155,7 @@ def unpack_lat_ctl(addr, dat):
       'path_angle': (dat[3] << 3) | (dat[4] >> 5),
       'path_offset': (dat[5] << 2) | (dat[6] >> 6),
       'inactive_curvature_rate': INACTIVE_CURVATURE_RATE,
+      'ramp_type': (dat[6] >> 4) & 0x3,
     }
   return {
     'enabled': ((dat[0] >> 4) & 0x7) != 0,
@@ -161,4 +164,5 @@ def unpack_lat_ctl(addr, dat):
     'path_angle': ((dat[3] & 0x1F) << 6) | (dat[4] >> 2),
     'path_offset': ((dat[4] & 0x3) << 8) | dat[5],
     'inactive_curvature_rate': INACTIVE_CURVATURE_RATE_CANFD,
+    'ramp_type': dat[0] & 0x3,
   }

@@ -87,6 +87,7 @@ class CarParamsSP:
     satObserver: bool = auto_field()
     deliveryCompensation: bool = auto_field()
     extendedModeTest: bool = auto_field()
+    releaseRampType: int = auto_field()
 
   @auto_dataclass
   class FordLongitudinalTuning:

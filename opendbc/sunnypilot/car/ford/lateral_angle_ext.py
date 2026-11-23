@@ -30,7 +30,8 @@ from numpy import clip, interp
 from opendbc.car import DT_CTRL
 from opendbc.car.ford.values import CarControllerParams
 from opendbc.sunnypilot.car.ford.human_turn import HumanTurnDetector
-from opendbc.sunnypilot.car.ford.lateral_common import INACTIVE_RESULT, FordLateralResult, get_current_curvature
+from opendbc.sunnypilot.car.ford.lateral_common import (INACTIVE_RESULT, RESTART_PULSE_RESULT, FordLateralResult,
+                                                        get_current_curvature)
 from opendbc.sunnypilot.car.ford.values_ext import (
   FORD_DBC_PATH_ANGLE_MAX,
   FORD_DBC_PATH_ANGLE_MIN,
@@ -369,9 +370,9 @@ class LateralAngleExt:
     alpha = _STEER_DT / (tau + _STEER_DT)
     self.delivery_comp += alpha * (target - self.delivery_comp)
 
-  def _reset(self, CS, actuators=None) -> FordLateralResult:
+  def _reset(self, CS, actuators=None, restart_pulse=False) -> FordLateralResult:
     """Zero the command and publish a truthful shadow. Used by the inactive, human-turn and
-    stall-blip paths, which all put mode 0 on the wire."""
+    stall-blip paths, which all put mode 0 on the wire; only the blips are restart pulses."""
     self.path_angle_last = 0.0
     self.curvature_deviation_limited = False
     self._clear_saturation_observer()
@@ -382,7 +383,7 @@ class LateralAngleExt:
     self.shadow_curvature = get_current_curvature(CS)
     if actuators is not None:
       self.desired_curvature_last = float(actuators.curvature)
-    return INACTIVE_RESULT
+    return RESTART_PULSE_RESULT if restart_pulse else INACTIVE_RESULT
 
   def _clear_stall_state(self) -> None:
     self.stall_blip_hold_s = 0.0
@@ -435,7 +436,7 @@ class LateralAngleExt:
       self.stall_blip_active = True
       if self.stall_blip_frames_left <= 0:
         self.stall_blip_cooldown_s = _STALL_COOLDOWN_S
-      return self._reset(CS, actuators)
+      return self._reset(CS, actuators, restart_pulse=True)
     self.stall_blip_active = False
 
     desired_curvature = float(actuators.curvature)
@@ -553,11 +554,11 @@ class LateralAngleExt:
       curvature_rate=0.0,
       path_offset=0.0,
       path_angle=path_angle,
-      # Inert in Limited mode: the PSCM's slew rate and deadband are fixed calibration
-      # (values_ext PSCM_SLEW_*, PSCM_DEADBAND_CAL) and no consumer of a received ramp or
-      # precision request selects either. These values are kept exactly as they have always been
-      # transmitted so the wire is unchanged, but nothing should be tuned on them, and `precision`
-      # above is a lane-change marker rather than a request the module acts on.
+      # Kept exactly as they have always been transmitted. In a steering frame the ramp type sets
+      # only how fast the PSCM ramps out on its own, after a bad frame or a fault; the release on a
+      # hand-back comes from the mode 0 frames, whose type the car controller picks. Precision
+      # acts through a data-file weight (values_ext's PSCM note), and `precision` above is a
+      # lane-change marker rather than a request tuned on what the module does with it.
       ramp_type=2,
       precision_type=precision,
       lat_inactive=False,

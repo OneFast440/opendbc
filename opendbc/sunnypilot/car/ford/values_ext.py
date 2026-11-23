@@ -63,6 +63,17 @@ class FordSafetyFlagsSP:
   LATERAL_MODE_MASK = 0x3
 
 
+# LatCtlRampType_D_Rq in the frames that hand steering back to the driver (request 0): on a disengage,
+# a human-turn hand-back and a standstill. The PSCM keeps steering with fading torque for as long as
+# that type's rate takes (the rate per type is in its data file; see the PSCM note below). Stock is
+# the 0 that Ford's camera and upstream openpilot send. Quick is 3, the fastest type on every Ford
+# module whose release has been run (45-51 Nm/s) and 50 Nm/s in every F-150 data file held, so it is
+# never slower than 0. Chosen by the FordQuickDisengageRelease param, carried on
+# CP_SP.fordLateralTuning.releaseRampType. Angle mode's short reset pulses always send 0.
+RELEASE_RAMP_TYPE_STOCK = 0
+RELEASE_RAMP_TYPE_QUICK = 3
+
+
 # Ford cruise control buttons live in Steering_Data_FD1 (CAN id 131) as 1-bit flags.
 # Some are combo buttons that emit two ButtonEvent types; carstate_ext picks which one to emit
 # based on whether cruise is currently engaged.
@@ -171,8 +182,9 @@ PSCM_ANGLE_FROM_KAPPA_V = 572.95776e-6
 # - LatCtl_D2_Rq selects the mode: 1 Limited, 2 Extended (its own torque limit, also in the data
 #   file), 0 or 3 none. A change between 1 and 2 while steering takes effect only after one frame of 0.
 # - precision_type acts on the preview time through a data-file weight, 0 in the stand-in.
-# The values we send are unchanged. Which release a driver should get is a tuning choice, not a fact
-# of the firmware.
+# The steering frames send what they always have. The frames that hand steering back send
+# RELEASE_RAMP_TYPE_STOCK unless the driver picks the quick release (RELEASE_RAMP_TYPE_QUICK): which
+# release a driver should get is a choice, not a fact of the firmware.
 # The PSCM broadcasts LatCtlLim_D_Stat on Lane_Assist_Data3_FD1 (0x3CC), but on CAN FD in angle
 # mode it does not fire even while the module is attenuating delivery. That is why saturation has
 # to be observed from delivered-vs-commanded motion rather than read off the bus.

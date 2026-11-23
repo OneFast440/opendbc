@@ -103,11 +103,10 @@ _MAX_PATH_ANGLE_CHANGE = 0.00125
 _MAX_PATH_OFFSET_CHANGE = 0.00125
 _MAX_CURVATURE_RATE_CHANGE = 0.00025  # >= the tightest curvature step (0.00008 at 25 m/s)
 
-# Inert in Limited mode: the PSCM's slew rate and deadband are fixed calibration (values_ext
-# PSCM_SLEW_*, PSCM_DEADBAND_CAL) and no consumer of a received ramp or precision request selects
-# either, per the ML3V-14D003-BC firmware read. These are kept, and kept varying exactly as they
-# always have, so the wire is unchanged pending on-vehicle confirmation, but nothing should be
-# tuned on them and they are not a lever for responsiveness.
+# Steering frames only, kept varying exactly as they always have. In a steering frame the ramp
+# type sets only how fast the PSCM ramps out on its own, after a bad frame or a fault; the release
+# on a hand-back comes from the mode 0 frames, whose type the car controller picks (values_ext
+# RELEASE_RAMP_TYPE_*). Neither is a lever for responsiveness while steering.
 _RAMP_IMMEDIATE = 3
 _RAMP_FAST = 2
 _PRECISION_COMFORTABLE = 0

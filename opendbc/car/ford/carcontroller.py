@@ -61,6 +61,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.lat_active_mode = 2 if (self.lateral_mode == PrimaryLateralControl.angle and
                                  CP_SP.fordLateralTuning.extendedModeTest) else 1
     self.lat_curv = LateralCurvExt(CP, CP_SP) if self.lateral_mode == PrimaryLateralControl.curvature else None
+    # sunnypilot: LatCtlRampType_D_Rq of every frame that hands steering back (mode 0), in every
+    # lateral mode. It sets how fast the PSCM lets go of its torque; 0 unless the driver chose the
+    # quick release (values_ext RELEASE_RAMP_TYPE_*).
+    self.release_ramp_type = int(np.clip(CP_SP.fordLateralTuning.releaseRampType, 0, 3))
     self.long_ext = LongitudinalExt(CP, CP_SP)
     self.hud = HudExt(CP, CP_SP)
 
@@ -157,6 +161,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     apply_curvature = CarControllerParams.CURVATURE_LIMITS.apply_limits(apply_curvature, self.apply_curvature_last, CS.out.vEgoRaw,
                                                                         0., CC.latActive, CarControllerParams.STEER_STEP)
     self.apply_curvature_last = apply_curvature
+    # sunnypilot: steering frames keep upstream's type 0; the frames that hand steering back carry the chosen release
+    ramp_type = 0 if CC.latActive else self.release_ramp_type
 
     if self.CP.flags & FordFlags.CANFD:
       # Ford uses four individual signals to dictate how to drive to the car. Curvature alone (limited to 0.02 m^-1)
@@ -166,8 +172,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       # https://www.f150gen14.com/forum/threads/introducing-bluepilot-a-ford-specific-fork-for-comma3x-openpilot.24241/#post-457706
       mode = 1 if CC.latActive else 0
       counter = (self.frame // CarControllerParams.STEER_STEP) % 0x10
-      return fordcan.create_lat_ctl2_msg(self.packer, self.CAN, mode, 0., 0., -self.apply_curvature_last, 0., counter)
-    return fordcan.create_lat_ctl_msg(self.packer, self.CAN, CC.latActive, 0., 0., -self.apply_curvature_last, 0.)
+      return fordcan.create_lat_ctl2_msg(self.packer, self.CAN, mode, 0., 0., -self.apply_curvature_last, 0., counter,
+                                         ramp_type)
+    return fordcan.create_lat_ctl_msg(self.packer, self.CAN, CC.latActive, 0., 0., -self.apply_curvature_last, 0.,
+                                      ramp_type)
 
   def _bluepilot_lateral_msg(self, CC, CC_SP, CS, actuators):
     """BluePilot: curvature-primary uses all four polynomial signals, angle-primary uses c1 alone."""
@@ -182,16 +190,19 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # and during angle mode's stall blip. Every check in safety/modes/ford.h has a legitimate
     # !steer_control_enabled branch, so those frames need no safety bypass.
     lat_active = CC.latActive and not lat.lat_inactive
+    # A mode 0 frame's ramp type sets how fast the PSCM lets go of its torque, so a hand-back carries the
+    # release the driver chose. Angle mode's reset pulses keep 0, which disturbs a restart least.
+    ramp_type = lat.ramp_type if (lat_active or lat.restart_pulse) else self.release_ramp_type
 
     if self.CP.flags & FordFlags.CANFD:
       mode = self.lat_active_mode if lat_active else 0
       counter = (self.frame // CarControllerParams.STEER_STEP) % 0x10
       return fordcan.create_lat_ctl2_msg(self.packer, self.CAN, mode, -lat.path_offset, -lat.path_angle,
                                          -lat.apply_curvature, -lat.curvature_rate, counter,
-                                         lat.ramp_type, lat.precision_type)
+                                         ramp_type, lat.precision_type)
     return fordcan.create_lat_ctl_msg(self.packer, self.CAN, lat_active, -lat.path_offset, -lat.path_angle,
                                       -lat.apply_curvature, -lat.curvature_rate,
-                                      lat.ramp_type, lat.precision_type)
+                                      ramp_type, lat.precision_type)
 
   def _long_msg(self, CC, CC_SP, CS, actuators):
     accel = actuators.accel

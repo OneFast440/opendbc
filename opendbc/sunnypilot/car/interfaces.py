@@ -34,6 +34,8 @@ from opendbc.sunnypilot.car.ford.values_ext import (
   LOW_SPEED_FACTOR_RANGE,
   PATH_OFFSET_RANGE,
   PrimaryLateralControl,
+  RELEASE_RAMP_TYPE_QUICK,
+  RELEASE_RAMP_TYPE_STOCK,
 )
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
 from opendbc.sunnypilot.car.rivian.values import RivianFlagsSP
@@ -234,6 +236,10 @@ def _initialize_ford(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_d
   lateral.primaryControl = int(mode)
   # bits 0-1 of the SP safety param; the panda falls back to stock on anything it does not know
   CP_SP.safetyParam |= int(mode) & FordSafetyFlagsSP.LATERAL_MODE_MASK
+  # Every mode, stock included: how fast the PSCM lets go when steering is handed back. The panda does
+  # not read the ramp type, so this needs no safety flag.
+  quick_release = _bool_param(params_dict, "FordQuickDisengageRelease")
+  lateral.releaseRampType = RELEASE_RAMP_TYPE_QUICK if quick_release else RELEASE_RAMP_TYPE_STOCK
 
   if mode == PrimaryLateralControl.angle:
     lateral.lowSpeedFactor = _clamp_tuning(params_dict.get("FordLowSpeedFactor_ang"), LOW_SPEED_FACTOR_RANGE)

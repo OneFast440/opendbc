@@ -16,10 +16,11 @@ FordLateralResult = namedtuple('FordLateralResult', [
   'curvature_rate',    # c3
   'path_offset',       # c0
   'path_angle',        # c1
-  'ramp_type',
+  'ramp_type',         # steering frames only: the car controller picks the type of a mode 0 frame
   'precision_type',
   'lat_inactive',      # True -> car controller must send mode 0 for this frame
-])
+  'restart_pulse',     # True -> a short mode 0 pulse that steering resumes after, not a hand-back
+], defaults=(False,))
 
 # Mode 0 with every signal at its inactive sentinel. Used by both strategies whenever lateral
 # hands back to the driver: on disengage, during a human-turn override, and during angle mode's
@@ -34,6 +35,11 @@ INACTIVE_RESULT = FordLateralResult(
   precision_type=1,
   lat_inactive=True,
 )
+
+# The same frame for angle mode's 300 ms reset pulses. The car controller gives these ramp type 0
+# whatever release the driver chose: in a pulse the PSCM is meant to pick straight back up, and on
+# the 2021 F-150's module a type-0 restart frame costs the least torque and is back soonest.
+RESTART_PULSE_RESULT = INACTIVE_RESULT._replace(restart_pulse=True)
 
 
 def get_current_curvature(CS) -> float:

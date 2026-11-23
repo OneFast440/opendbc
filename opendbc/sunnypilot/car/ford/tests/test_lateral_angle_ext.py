@@ -145,6 +145,8 @@ class TestLateralAngleExt(unittest.TestCase):
     self.assertTrue(result.lat_inactive)
     self.assertEqual(result.path_angle, 0.0)
     self.assertEqual(result.ramp_type, 0)
+    # a hand-back to the driver, so it carries the chosen release rather than a restart's type 0
+    self.assertFalse(result.restart_pulse)
 
     # on release the command ramps back in from zero rather than snapping to a stale value
     released = self.lat.update(make_cc(), make_cc_sp(), make_cs(v_ego=15.0), make_actuators(0.01))
@@ -186,6 +188,7 @@ class TestLateralAngleExt(unittest.TestCase):
 
     result = self.lat.update(make_cc(), make_cc_sp(), make_cs(v_ego=15.0), make_actuators(0.0))
     self.assertTrue(result.lat_inactive)
+    self.assertTrue(result.restart_pulse)
     self.assertTrue(self.lat.stall_blip_active)
 
     # the pulse is short and self-clearing

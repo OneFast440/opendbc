@@ -28,13 +28,15 @@ from opendbc.sunnypilot.car.ford.tests.helpers import (
   SendButtonState,
   VisualAlert,
   make_car_controller,
+  make_car_params,
   make_cc,
   make_cc_sp,
   make_cs,
   make_lead,
   unpack_lat_ctl,
 )
-from opendbc.sunnypilot.car.ford.values_ext import PrimaryLateralControl
+from opendbc.sunnypilot.car.ford.values_ext import RELEASE_RAMP_TYPE_QUICK, RELEASE_RAMP_TYPE_STOCK, PrimaryLateralControl
+from opendbc.sunnypilot.car.interfaces import _initialize_ford
 
 PLATFORMS = (CAR.FORD_F_150_MK14, CAR.FORD_ESCAPE_MK4)  # CAN FD and CAN
 
@@ -156,6 +158,98 @@ class TestFordCarControllerLateral(unittest.TestCase):
           out, _ = controller.update(make_cc(curvature=0.004), make_cc_sp(),
                                      make_cs(v_ego=20.0, yaw_rate=0.02), 0)
         self.assertNotEqual(out.curvature, 0.0)
+
+
+def without_ramp_type(addr, dat):
+  """The frame with its ramp type, and the checksum that covers it, blanked out."""
+  dat = bytearray(dat)
+  if addr == MSG_LateralMotionControl2:
+    dat[0] &= 0xFC  # LatCtlRampType_D_Rq
+    dat[1] = 0      # LatCtlPath_No_Cs
+  else:
+    dat[6] &= 0xCF  # LatCtlRampType_D_Rq
+  return bytes(dat)
+
+
+class TestFordCarControllerRelease(unittest.TestCase):
+  """A mode 0 frame's ramp type sets how fast the PSCM lets go of its torque. Every frame that hands
+  steering back carries the release the driver chose, and nothing else on the wire moves."""
+
+  @staticmethod
+  def _run(platform, mode, release, phases):
+    controller, CP = make_car_controller(platform, mode=mode, release_ramp_type=release)
+    addr = steer_addr(CP)
+    frames = [[dat for _, dat, _ in msgs(drive(controller, CP, frames=n, cc=cc, cs=cs), addr)] for n, cc, cs in phases]
+    return addr, frames
+
+  def test_a_disengage_carries_the_chosen_release_in_every_mode(self):
+    phases = ((200, make_cc(curvature=0.002), make_cs(v_ego=20.0)),
+              (100, make_cc(lat_active=False), make_cs(v_ego=20.0)))
+    for platform in PLATFORMS:
+      for mode in PrimaryLateralControl:
+        with self.subTest(platform=platform, mode=mode):
+          addr, (stock_on, stock_off) = self._run(platform, mode, RELEASE_RAMP_TYPE_STOCK, phases)
+          _, (quick_on, quick_off) = self._run(platform, mode, RELEASE_RAMP_TYPE_QUICK, phases)
+          # the steering frames are untouched
+          self.assertTrue(unpack_lat_ctl(addr, quick_on[-1])['enabled'])
+          self.assertEqual(quick_on, stock_on)
+          # every frame of the hand-back carries the chosen type, and only the type differs
+          self.assertTrue(quick_off)
+          for stock, quick in zip(stock_off, quick_off, strict=True):
+            self.assertFalse(unpack_lat_ctl(addr, quick)['enabled'])
+            self.assertEqual(unpack_lat_ctl(addr, stock)['ramp_type'], RELEASE_RAMP_TYPE_STOCK)
+            self.assertEqual(unpack_lat_ctl(addr, quick)['ramp_type'], RELEASE_RAMP_TYPE_QUICK)
+            self.assertEqual(without_ramp_type(addr, quick), without_ramp_type(addr, stock))
+
+  def test_a_hand_back_to_the_driver_carries_the_chosen_release(self):
+    """The human-turn hand-back, and curvature mode's standstill, hand steering back like a disengage."""
+    turn = make_cs(v_ego=15.0, steering_pressed=True, steering_angle=60.0)
+    cases = ((PrimaryLateralControl.curvature, turn), (PrimaryLateralControl.angle, turn),
+             (PrimaryLateralControl.curvature, make_cs(v_ego=0.0, standstill=True)))
+    for platform in PLATFORMS:
+      for mode, cs in cases:
+        with self.subTest(platform=platform, mode=mode, v_ego=cs.out.vEgoRaw):
+          addr, (frames,) = self._run(platform, mode, RELEASE_RAMP_TYPE_QUICK, ((500, make_cc(curvature=0.01), cs),))
+          last = unpack_lat_ctl(addr, frames[-1])
+          self.assertFalse(last['enabled'])
+          self.assertEqual(last['ramp_type'], RELEASE_RAMP_TYPE_QUICK)
+
+  def test_angle_modes_reset_pulse_keeps_type_0(self):
+    """The 300 ms pulse after a sustained press is a restart, not a hand-back: type 0 whatever the
+    release, and steering picks up after it."""
+    phases = ((100, make_cc(), make_cs(v_ego=15.0)),
+              (60, make_cc(), make_cs(v_ego=15.0, steering_pressed=True, steering_angle=5.0)),
+              (60, make_cc(), make_cs(v_ego=15.0)),
+              (40, make_cc(lat_active=False), make_cs(v_ego=15.0)))
+    for platform in PLATFORMS:
+      with self.subTest(platform=platform):
+        addr, (_, _, after_press, released) = self._run(platform, PrimaryLateralControl.angle,
+                                                        RELEASE_RAMP_TYPE_QUICK, phases)
+        after_press = [unpack_lat_ctl(addr, dat) for dat in after_press]
+        pulse = [sig for sig in after_press if not sig['enabled']]
+        self.assertEqual(len(pulse), 6)
+        self.assertEqual({sig['ramp_type'] for sig in pulse}, {0})
+        self.assertTrue(after_press[-1]['enabled'])
+        self.assertEqual({unpack_lat_ctl(addr, dat)['ramp_type'] for dat in released}, {RELEASE_RAMP_TYPE_QUICK})
+
+
+class TestFordReleaseSetting(unittest.TestCase):
+  def test_the_param_sets_the_release_in_every_mode(self):
+    for mode in PrimaryLateralControl:
+      for value, expected in ((None, RELEASE_RAMP_TYPE_STOCK), ("0", RELEASE_RAMP_TYPE_STOCK),
+                              ("1", RELEASE_RAMP_TYPE_QUICK), ("", RELEASE_RAMP_TYPE_STOCK),
+                              ("yes", RELEASE_RAMP_TYPE_STOCK)):
+        with self.subTest(mode=mode, value=value):
+          params = {"FordPrefLateralControl": str(int(mode))}
+          CP, without = make_car_params()
+          _initialize_ford(CP, without, params)
+          if value is not None:
+            params["FordQuickDisengageRelease"] = value
+          CP, CP_SP = make_car_params()
+          _initialize_ford(CP, CP_SP, params)
+          self.assertEqual(CP_SP.fordLateralTuning.releaseRampType, expected)
+          # the panda does not read the ramp type, so the setting adds nothing to the safety param
+          self.assertEqual(CP_SP.safetyParam, without.safetyParam)
 
 
 class TestFordCarControllerLongitudinal(unittest.TestCase):
