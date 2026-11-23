@@ -2,7 +2,7 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, create_button_events, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.ford.fordcan import CanBus
-from opendbc.car.ford.values import DBC, CarControllerParams, FordFlags
+from opendbc.car.ford.values import CAR, DBC, CarControllerParams, FordFlags
 from opendbc.car.interfaces import CarStateBase
 
 from opendbc.sunnypilot.car.ford.carstate_ext import BRAKE_LAMP_MSGS, CarStateExt
@@ -11,6 +11,12 @@ from opendbc.sunnypilot.car.ford.mads import MadsCarState
 ButtonType = structs.CarState.ButtonEvent.Type
 GearShifter = structs.CarState.GearShifter
 TransmissionType = structs.CarParams.TransmissionType
+
+# The EPS on these platforms sends SteeringColumnTorque as trunc((torque + 7.9375) * 16), while the DBC decodes
+# raw * 0.0625 - 8, so the decoded value is 1/16 to 2/16 Nm below the EPS's torque. Add the middle of that step.
+# Every EPS these two platforms fingerprint (ML3V-14D003-BA / -BC / -BD, RL38-14D003-AA) packs it this way.
+STEERING_TORQUE_DECODE_OFFSET = 3 / 32  # Nm
+STEERING_TORQUE_DECODE_OFFSET_CARS = (CAR.FORD_F_150_MK14, CAR.FORD_F_150_LIGHTNING_MK1)
 
 
 class CarState(CarStateBase, MadsCarState, CarStateExt):
@@ -24,6 +30,7 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
 
     self.distance_button = 0
     self.lc_button = 0
+    self.steering_torque_offset = STEERING_TORQUE_DECODE_OFFSET if CP.carFingerprint in STEERING_TORQUE_DECODE_OFFSET_CARS else 0.
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
@@ -51,7 +58,7 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
 
     # steering wheel
     ret.steeringAngleDeg = cp.vl["SteeringPinion_Data"]["StePinComp_An_Est"]
-    ret.steeringTorque = cp.vl["EPAS_INFO"]["SteeringColumnTorque"]
+    ret.steeringTorque = cp.vl["EPAS_INFO"]["SteeringColumnTorque"] + self.steering_torque_offset
     ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > CarControllerParams.STEER_DRIVER_ALLOWANCE, 5)
     ret.steerFaultTemporary = cp.vl["EPAS_INFO"]["EPAS_Failure"] == 1
     ret.steerFaultPermanent = cp.vl["EPAS_INFO"]["EPAS_Failure"] in (2, 3)

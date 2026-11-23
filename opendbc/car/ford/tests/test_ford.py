@@ -1,9 +1,13 @@
 import random
 import unittest
 
+from opendbc.can import CANPacker
+from opendbc.car import Bus
+from opendbc.car.can_definitions import CanData
 from opendbc.car.structs import CarParams
 from opendbc.car.fw_versions import build_fw_dict
-from opendbc.car.ford.values import CAR, FW_QUERY_CONFIG, FW_PATTERN, get_platform_codes
+from opendbc.car.ford.interface import CarInterface
+from opendbc.car.ford.values import CAR, DBC, FW_QUERY_CONFIG, FW_PATTERN, get_platform_codes
 from opendbc.car.ford.fingerprints import FW_VERSIONS
 from opendbc.testing import fuzzy_test, parameterized
 
@@ -36,6 +40,24 @@ ECU_PART_NUMBER = {
     b"14H102",  # Ford Q4
   ],
 }
+
+
+class TestFordCarState(unittest.TestCase):
+  @parameterized("car_model, offset", ((CAR.FORD_F_150_MK14, 3 / 32), (CAR.FORD_F_150_LIGHTNING_MK1, 3 / 32), (CAR.FORD_EXPLORER_MK6, 0.)))
+  def test_steering_column_torque(self, car_model, offset):
+    # The F-150 and Lightning EPS truncates the column torque when it packs it: a decoded value b is a torque in
+    # [b + 1/16, b + 2/16), so the driver threshold is 1.0 Nm both ways only with the offset
+    CP = CarInterface.get_non_essential_params(car_model)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, car_model)
+    packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
+    pressed_raws = (143, 110) if offset else (145, 111)
+    for raw in (128, pressed_raws[0] - 1, pressed_raws[0], pressed_raws[1] + 1, pressed_raws[1]):
+      CI = CarInterface(CP, CP_SP)
+      msg = packer.make_can_msg("EPAS_INFO", 0, {"SteeringColumnTorque": raw * 0.0625 - 8})
+      for frame in range(10):  # steeringPressed needs 5 frames
+        CS, _ = CI.update([(frame * 10_000_000, [CanData(*msg)])])
+      self.assertAlmostEqual(CS.steeringTorque, raw * 0.0625 - 8 + offset)
+      self.assertEqual(CS.steeringPressed, raw in pressed_raws)
 
 
 class TestFordFW(unittest.TestCase):
