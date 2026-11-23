@@ -276,6 +276,13 @@ def ford_asbuilt_block_response(block_id: int):
   return bytes([uds.SERVICE_TYPE.READ_DATA_BY_IDENTIFIER + 0x40]) + p16(DATA_IDENTIFIER_FORD_ASBUILT + block_id - 1)
 
 
+# sunnypilot: the data file part number (14D007 for a steering module), next to the strategy (F188). Logged for the
+# steering module only, so the car port can tell which numbers it steers by (opendbc/sunnypilot/car/ford/pscm_rows.py)
+DATA_IDENTIFIER_FORD_DATA_FILE = 0xF10A
+FORD_DATA_FILE_REQUEST = bytes([uds.SERVICE_TYPE.READ_DATA_BY_IDENTIFIER]) + p16(DATA_IDENTIFIER_FORD_DATA_FILE)
+FORD_DATA_FILE_RESPONSE = bytes([uds.SERVICE_TYPE.READ_DATA_BY_IDENTIFIER + 0x40]) + p16(DATA_IDENTIFIER_FORD_DATA_FILE)
+
+
 FW_QUERY_CONFIG = FwQueryConfig(
   fw_version_regex=br"[A-HJ-NP-VX-Z][0-9A-HJ-NP-VX-Z]{3}-[0-9A-HJ-NP-VX-Z]{5,6}-[A-HJ-NP-VX-Z]{2,}\x00*",
   requests=[
@@ -300,6 +307,13 @@ FW_QUERY_CONFIG = FwQueryConfig(
       bus=0,
       logging=True,
     ) for block_id, ecus in ASBUILT_BLOCKS],
+    Request(
+      [StdQueries.TESTER_PRESENT_REQUEST, FORD_DATA_FILE_REQUEST],
+      [StdQueries.TESTER_PRESENT_RESPONSE, FORD_DATA_FILE_RESPONSE],
+      whitelist_ecus=[Ecu.eps],
+      bus=0,
+      logging=True,
+    ),
   ],
   extra_ecus=[
     (Ecu.engine, 0x7e0, None),        # Powertrain Control Module

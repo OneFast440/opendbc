@@ -28,10 +28,12 @@ from collections import deque
 from numpy import clip, interp
 
 from opendbc.car import DT_CTRL
+from opendbc.car.carlog import carlog
 from opendbc.car.ford.values import CarControllerParams
 from opendbc.sunnypilot.car.ford.human_turn import HumanTurnDetector
 from opendbc.sunnypilot.car.ford.lateral_common import (INACTIVE_RESULT, RESTART_PULSE_RESULT, FordLateralResult,
                                                         get_current_curvature)
+from opendbc.sunnypilot.car.ford.pscm_rows import pscm_row
 from opendbc.sunnypilot.car.ford.values_ext import (
   FORD_DBC_PATH_ANGLE_MAX,
   FORD_DBC_PATH_ANGLE_MIN,
@@ -224,6 +226,16 @@ class LateralAngleExt:
 
     # Per-platform gains, applied only at high speed (see _GAIN_SPEED_BP).
     self.path_angle_gain_low_curv, self.path_angle_gain_high_curv = platform_path_angle_gains(CP.carFingerprint)
+
+    # When the steering module's program and data file are a known pair (pscm_rows), path angle is sized by the
+    # module's own gain instead, so the module targets exactly the curvature asked for; the user factors below then
+    # scale that, 1.0 being the module's own law. Anything else keeps the platform gains.
+    self.module_row = pscm_row(CP.carFw)
+    if self.module_row is not None:
+      self.module_t = self.module_row.t_for_mode(2 if tuning.extendedModeTest else 1)
+      self.module_hold_kph = self.module_row.hold_kph(self.module_t)
+      carlog.warning("Ford angle mode: path angle by the steering module's own gain (%s + %s)",
+                     self.module_row.program.decode(), self.module_row.data_file.decode())
 
     # User tuning. Read once at car init: the panda safety flag comes from the same read, and a
     # live flip against stale firmware would fight the panda.
@@ -511,12 +523,20 @@ class LateralAngleExt:
     # safety check still sees an in-range number without the actuator inheriting the c2 ceiling.
 
     # *** kappa -> path_angle ***
-    low_gain = float(interp(v_ego, _GAIN_SPEED_BP,
-                            [1.0, self.path_angle_gain_low_curv * self.high_speed_dampening]))
-    high_gain = float(interp(v_ego, _GAIN_SPEED_BP,
-                             [_LOW_SPEED_GAIN * self.low_speed_factor,
-                              self.path_angle_gain_high_curv * self.high_speed_factor]))
-    # Bigger curves need a little more signal to avoid understeer.
+    if self.module_row is not None:
+      # The module's own gain, with the user factors as plain multipliers on it: with every factor at 1.0 the
+      # module targets exactly kappa_cmd (K2 * path_angle), at every speed and curvature.
+      module_gain = self.module_row.angle_gain(v_ego, self.module_t, self.module_hold_kph)
+      low_gain = module_gain * float(interp(v_ego, _GAIN_SPEED_BP, [1.0, self.high_speed_dampening]))
+      high_gain = module_gain * float(interp(v_ego, _GAIN_SPEED_BP, [self.low_speed_factor, self.high_speed_factor]))
+    else:
+      low_gain = float(interp(v_ego, _GAIN_SPEED_BP,
+                              [1.0, self.path_angle_gain_low_curv * self.high_speed_dampening]))
+      high_gain = float(interp(v_ego, _GAIN_SPEED_BP,
+                               [_LOW_SPEED_GAIN * self.low_speed_factor,
+                                self.path_angle_gain_high_curv * self.high_speed_factor]))
+    # Bigger curves need a little more signal to avoid understeer (the platform gains; on a module row the two
+    # differ only by the user's factors).
     gain = float(interp(abs(kappa_cmd), _GAIN_CURV_BP, [low_gain, high_gain]))
     # Cancel the measured delivery shortfall. Computed at the end of the previous frame, so it
     # is one 20 Hz tick old, which against a 2 s time constant does not matter.
