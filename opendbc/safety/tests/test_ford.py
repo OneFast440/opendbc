@@ -463,14 +463,19 @@ class TestFordLongitudinalSafetyBase(TestFordSafetyBase):
   INACTIVE_GAS = -5.0
 
   # ACC command
-  def _acc_command_msg(self, gas: float, brake: float, brake_actuation: bool, cmbb_deny: bool = False):
+  def _acc_command_msg(self, gas: float, brake: float, brake_actuation: bool, cmbb_deny: bool = False,
+                       gas_pred: float | None = None, precharge: bool | None = None, brake_pulse: bool = False,
+                       park_brake: bool = False, stop_request: bool = False):
     values = {
       "AccPrpl_A_Rq": gas,                              # [-5|5.23] m/s^2
-      "AccPrpl_A_Pred": gas,                            # [-5|5.23] m/s^2
+      "AccPrpl_A_Pred": gas if gas_pred is None else gas_pred,  # [-5|5.23] m/s^2
       "AccBrkTot_A_Rq": brake,                          # [-20|11.9449] m/s^2
-      "AccBrkPrchg_B_Rq": 1 if brake_actuation else 0,  # Pre-charge brake request: 0=No, 1=Yes
+      "AccBrkPrchg_B_Rq": 1 if (brake_actuation if precharge is None else precharge) else 0,  # Pre-charge brake request
       "AccBrkDecel_B_Rq": 1 if brake_actuation else 0,  # Deceleration request: 0=Inactive, 1=Active
       "CmbbDeny_B_Actl": 1 if cmbb_deny else 0,         # [0|1] deny AEB actuation
+      "AccBrkPulse_B_Rq": 1 if brake_pulse else 0,      # brake pulse request
+      "AccBrkPrkEl_B_Rq": 1 if park_brake else 0,       # electric parking brake request
+      "AccStopStat_B_Rq": 1 if stop_request else 0,     # stop and hold request
     }
     return self.packer.make_can_msg_safety("ACCDATA", 0, values)
 
@@ -482,7 +487,54 @@ class TestFordLongitudinalSafetyBase(TestFordSafetyBase):
         should_tx = not cmbb_deny
         self.assertEqual(should_tx, self._tx(self._acc_command_msg(self.INACTIVE_GAS, self.INACTIVE_ACCEL, controls_allowed, cmbb_deny)))
         should_tx = controls_allowed and not cmbb_deny
-        self.assertEqual(should_tx, self._tx(self._acc_command_msg(self.MAX_GAS, self.MAX_ACCEL, controls_allowed, cmbb_deny)))
+        self.assertEqual(should_tx, self._tx(self._acc_command_msg(self.MAX_GAS, self.MAX_ACCEL, False, cmbb_deny)))
+
+  def test_brake_pulse(self):
+    # AccBrkPulse_B_Rq is never sent: the ABS pulses the brakes on it in every cruise state
+    for controls_allowed in (True, False):
+      self.safety.set_controls_allowed(controls_allowed)
+      for brake_pulse in (True, False):
+        should_tx = not brake_pulse
+        self.assertEqual(should_tx, self._tx(self._acc_command_msg(self.INACTIVE_GAS, self.INACTIVE_ACCEL, False, brake_pulse=brake_pulse)))
+        should_tx = controls_allowed and not brake_pulse
+        self.assertEqual(should_tx, self._tx(self._acc_command_msg(self.INACTIVE_GAS, self.MIN_ACCEL, controls_allowed, brake_pulse=brake_pulse)))
+
+  def test_park_brake(self):
+    # AccBrkPrkEl_B_Rq is never sent
+    for controls_allowed in (True, False):
+      self.safety.set_controls_allowed(controls_allowed)
+      for park_brake in (True, False):
+        should_tx = not park_brake
+        self.assertEqual(should_tx, self._tx(self._acc_command_msg(self.INACTIVE_GAS, self.INACTIVE_ACCEL, False, park_brake=park_brake)))
+        should_tx = controls_allowed and not park_brake
+        self.assertEqual(should_tx, self._tx(self._acc_command_msg(self.INACTIVE_GAS, self.MIN_ACCEL, controls_allowed, park_brake=park_brake)))
+
+  def test_stop_request(self):
+    # AccStopStat_B_Rq brakes to a stop and holds below walking pace: only when longitudinal is allowed
+    for controls_allowed in (True, False):
+      self.safety.set_controls_allowed(controls_allowed)
+      for stop_request in (True, False):
+        should_tx = controls_allowed or not stop_request
+        self.assertEqual(should_tx, self._tx(self._acc_command_msg(self.INACTIVE_GAS, self.INACTIVE_ACCEL, False, stop_request=stop_request)))
+        # stopping as openpilot does: the stop request with the brake bits
+        self.assertEqual(controls_allowed, self._tx(self._acc_command_msg(self.INACTIVE_GAS, self.MIN_ACCEL, True, stop_request=stop_request)))
+    # and not while the driver presses the accelerator
+    self.safety.set_controls_allowed(True)
+    self._rx(self._user_gas_msg(1))
+    self._rx(self._user_gas_msg(1))
+    self.assertFalse(self._tx(self._acc_command_msg(self.INACTIVE_GAS, self.INACTIVE_ACCEL, False, stop_request=True)))
+    self.assertTrue(self._tx(self._acc_command_msg(self.INACTIVE_GAS, self.INACTIVE_ACCEL, False, stop_request=False)))
+
+  def test_brake_decel_excludes_gas(self):
+    # no propulsion request (AccPrpl_A_Rq or AccPrpl_A_Pred) in a frame with AccBrkDecel_B_Rq; pre-charge alone may have one
+    self.safety.set_controls_allowed(True)
+    for decel in (True, False):
+      for gas in (self.INACTIVE_GAS, self.MIN_GAS, 0.0, self.MAX_GAS):
+        for gas_pred in (self.INACTIVE_GAS, self.MIN_GAS, 0.0, self.MAX_GAS):
+          for precharge in (True, False):
+            should_tx = not decel or (gas == self.INACTIVE_GAS and gas_pred == self.INACTIVE_GAS)
+            msg = self._acc_command_msg(gas, self.MIN_ACCEL, decel, gas_pred=gas_pred, precharge=precharge)
+            self.assertEqual(should_tx, self._tx(msg), (decel, gas, gas_pred, precharge))
 
   def test_gas_safety_check(self):
     for controls_allowed in (True, False):
@@ -490,7 +542,7 @@ class TestFordLongitudinalSafetyBase(TestFordSafetyBase):
       for gas in np.concatenate((np.arange(self.MIN_GAS - 2, self.MAX_GAS + 2, 0.05), [self.INACTIVE_GAS])):
         gas = round(gas, 2)  # floats might not hit exact boundary conditions without rounding
         should_tx = (controls_allowed and self.MIN_GAS <= gas <= self.MAX_GAS) or gas == self.INACTIVE_GAS
-        self.assertEqual(should_tx, self._tx(self._acc_command_msg(gas, self.INACTIVE_ACCEL, controls_allowed)))
+        self.assertEqual(should_tx, self._tx(self._acc_command_msg(gas, self.INACTIVE_ACCEL, False)))
 
   def test_brake_safety_check(self):
     brake_values = self._boundary_values([self.MIN_ACCEL, self.MAX_ACCEL, self.INACTIVE_ACCEL],

@@ -457,6 +457,14 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
 
     // Signal: AccBrkPrchg_B_Rq & AccBrkDecel_B_Rq
     bool brake_actuation = (msg->data[6] & 0xC0U) != 0U;
+    // Signal: AccBrkDecel_B_Rq
+    bool brake_decel = GET_BIT(msg, 55U);
+    // Signal: AccStopStat_B_Rq
+    // Below walking speed with cruise active, the ABS brakes to a stop and holds on this request alone
+    bool stop_request = GET_BIT(msg, 34U);
+    // Signal: AccBrkPulse_B_Rq & AccBrkPrkEl_B_Rq
+    // The ABS pulses the brakes on AccBrkPulse_B_Rq in any cruise state, even with cruise off. openpilot sends neither
+    bool unused_brake_request = GET_BIT(msg, 36U) || GET_BIT(msg, 38U);
 
     bool violation = false;
     violation |= longitudinal_accel_checks(accel, FORD_LONG_LIMITS);
@@ -466,7 +474,11 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     // Safety check for stock AEB
     violation |= cmbb_deny;  // do not prevent stock AEB actuation
 
-    violation |= !get_longitudinal_allowed() && brake_actuation;
+    violation |= !get_longitudinal_allowed() && (brake_actuation || stop_request);
+    violation |= unused_brake_request;
+
+    // The PCM cannot see brake force: a propulsion request in a frame with the decel bit pushes against the brakes
+    violation |= brake_decel && ((gas != FORD_LONG_LIMITS.inactive_gas) || (gas_pred != FORD_LONG_LIMITS.inactive_gas));
 
     if (violation) {
       tx = false;
