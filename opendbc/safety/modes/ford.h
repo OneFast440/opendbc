@@ -139,6 +139,73 @@ static int ford_shadow_curvature_to_can(int raw) {
   return ROUND((float)raw * 0.05f);
 }
 
+// sunnypilot: the steering module's own path-angle gain, as a bound on angle mode's actuator.
+//
+// In angle mode the module turns path angle into target curvature with a gain K2 that it looks up from its data file
+// by a preview distance (opendbc/sunnypilot/car/ford/pscm_rows.py), so a path angle is only as safe as K2 times it.
+// When openpilot has matched the module's program and data file at car init, it names that module in bits 2-3 of the
+// SP safety param. The implied curvature is then held inside comma's lateral acceleration cap, taking the largest K2
+// the module can use at the lowest recent speed over every preview time it can reach, times a margin for the module
+// reading its own speed lower than the panda does. With no known module (0, or an index this firmware does not know)
+// path angle keeps the signal's own range, as before.
+#define FORD_PSCM_ROW_ML3V_BC_PL3V_CB 1U  // ML3V-14D003-BC with data file PL3V-14D007-CB (F-150 Raptor)
+#define FORD_PSCM_SPEED_POINTS 8
+#define FORD_PSCM_K2_POINTS 10
+#define FORD_PSCM_K2_MARGIN 1.10f
+
+typedef struct {
+  float speeds_kph[FORD_PSCM_SPEED_POINTS];
+  float d_low[FORD_PSCM_SPEED_POINTS];      // preview distance floor, m
+  float d_high[FORD_PSCM_SPEED_POINTS];     // preview distance ceiling, m
+  float k2_distances[FORD_PSCM_K2_POINTS];  // m
+  float k2[FORD_PSCM_K2_POINTS];            // target curvature per radian of path angle, 1/m
+  float t_min;                              // shortest preview time, s
+} FordPscmRow;
+
+static const FordPscmRow *ford_pscm_row = NULL;  // set in ford_init, which holds each row's numbers
+
+// safety_interpolate's rule (ends held, linear between points) over a table of any length
+static float ford_interp(const float *xs, const float *ys, int size, float x) {
+  float ret = ys[size - 1];
+  if (x <= xs[0]) {
+    ret = ys[0];
+  } else {
+    for (int i = 0; i < (size - 1); i++) {
+      if (x < xs[i + 1]) {
+        ret = ys[i] + ((ys[i + 1] - ys[i]) * (x - xs[i]) / (xs[i + 1] - xs[i]));
+        break;
+      }
+    }
+  }
+  return ret;
+}
+
+// The largest K2 the module can use at this speed (m/s): its preview distance is d = 0.28 * v(km/h) * T, held between
+// the two tables, so over T from its floor up the distance is never shorter than the lesser of the ceiling and the
+// floor at T's minimum. Never above the table's own largest gain.
+static float ford_pscm_k2_max(const FordPscmRow *row, float speed) {
+  const float v_kph = speed * 3.6f;
+  const float d_high = ford_interp(row->speeds_kph, row->d_high, FORD_PSCM_SPEED_POINTS, v_kph);
+  const float d_low = ford_interp(row->speeds_kph, row->d_low, FORD_PSCM_SPEED_POINTS, v_kph);
+  const float d = SAFETY_MIN(d_high, SAFETY_MAX(0.28f * v_kph * row->t_min, d_low));
+  const float k2 = ford_interp(row->k2_distances, row->k2, FORD_PSCM_K2_POINTS, d) * FORD_PSCM_K2_MARGIN;
+  return SAFETY_MIN(k2, row->k2[0]);
+}
+
+static bool ford_pscm_path_angle_checks(int desired_path_angle) {
+  bool violation = false;
+  if (ford_pscm_row != NULL) {
+    const float max_lateral_accel = ISO_LATERAL_ACCEL + (EARTH_G * AVERAGE_ROAD_ROLL);  // ~3.6 m/s^2, comma's cap
+    // the lowest recent speed gives the largest K2; the cap's speed is fudged down by 1 m/s as comma's own check does
+    const float speed = vehicle_speed.min / VEHICLE_SPEED_FACTOR;
+    const float fudged_speed = SAFETY_MAX(speed - 1.0f, 1.0f);
+    const float max_curvature = max_lateral_accel / (fudged_speed * fudged_speed);
+    const int max_path_angle = ((max_curvature / ford_pscm_k2_max(ford_pscm_row, speed)) * FORD_PATH_ANGLE_TO_CAN) + 1.;
+    violation = safety_max_limit_check(desired_path_angle, max_path_angle, -max_path_angle);
+  }
+  return violation;
+}
+
 // path_angle rate-of-change limit. Rate is anchored to the command sequence rather than to a
 // measurement -- there is no "measured path angle" -- so the previous command is recorded even on
 // a violation: holding it stale would desync this window from openpilot's own (tighter) limiter
@@ -335,10 +402,14 @@ static bool ford_bp_tx_checks(bool steer_control_enabled, unsigned int raw_curva
     // the result.
     speed_mismatch_check((float)vehicle_speed_2.values[0] / VEHICLE_SPEED_FACTOR);
 
-    // c2 and c3 are held inactive; c1 is the actuator and may use the whole signal range
+    // c2 and c3 are held inactive; c1 is the actuator and may use the whole signal range, or on a known module what
+    // that module's gain turns into no more than comma's lateral acceleration cap
     violation |= raw_curvature != FORD_INACTIVE_CURVATURE;
     violation |= raw_curvature_rate != inactive_curvature_rate;
     violation |= ford_path_angle_cmd_checks(desired_path_angle, steer_control_enabled, 0);
+    if (steer_control_enabled) {
+      violation |= ford_pscm_path_angle_checks(desired_path_angle);
+    }
     violation |= ford_shadow_curvature_checks(ford_shadow_curvature_to_can(ford_shadow_curvature_raw),
                                               steer_control_enabled, FORD_STEERING_LIMITS);
 
@@ -640,6 +711,21 @@ static safety_config ford_init(uint16_t param) {
   ford_angle_mode_engaged = false;
   ford_shadow_curvature_raw = 0;
   ford_desired_path_angle_last = 0;
+
+  // sunnypilot: the steering module openpilot matched at car init (bits 2-3), whose gain bounds path angle. Only angle
+  // mode's branch of ford_bp_tx_checks asks for it, so the bits mean nothing in the other modes.
+  // The module's own numbers, as its data file stores them (pscm_rows.py holds the same row).
+  static const FordPscmRow FORD_PSCM_ROW_RAPTOR = {
+    .speeds_kph = {0.0f, 7.0f, 18.0f, 30.0f, 60.0f, 100.0f, 160.0f, 200.0f},
+    .d_low = {45.0f, 45.0f, 45.0f, 49.85f, 80.1515f, 100.0f, 160.0f, 200.0f},
+    .d_high = {0.0f, 7.77f, 20.0f, 33.33f, 66.66f, 111.111f, 177.0f, 222.222f},
+    .k2_distances = {10.0f, 20.0f, 30.0f, 40.0f, 50.0f, 60.0f, 70.0f, 80.0f, 100.0f, 150.0f},
+    .k2 = {0.3464f, 0.1732f, 0.1155f, 0.0866f, 0.0693f, 0.0577f, 0.0495f, 0.0433f, 0.0346f, 0.0231f},
+    .t_min = 3.0f,
+  };
+  const uint16_t FORD_PARAM_SP_PSCM_ROW_MASK = 0xCU;
+  const uint16_t ford_pscm_row_index = (current_safety_param_sp & FORD_PARAM_SP_PSCM_ROW_MASK) >> 2U;
+  ford_pscm_row = (ford_pscm_row_index == FORD_PSCM_ROW_ML3V_BC_PL3V_CB) ? &FORD_PSCM_ROW_RAPTOR : NULL;
 
   // sunnypilot: openpilot longitudinal follows the alpha longitudinal toggle on every Ford, so
   // ACCDATA is in the allowlist only when the toggle is on. Two changes from upstream:

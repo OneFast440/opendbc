@@ -59,8 +59,14 @@ class FordSafetyFlagsSP:
 
   Bits 0-1 carry the PrimaryLateralControl value, so the panda knows which signal is the actuator
   and which signals must stay at their inactive sentinels.
+
+  Bits 2-3 carry, in angle mode only, the steering module row openpilot matched at car init
+  (pscm_rows.PscmRow.panda_row): the panda then bounds path angle by that module's own gain. 0 is
+  no known module, and leaves path angle its signal's own range.
   """
   LATERAL_MODE_MASK = 0x3
+  PSCM_ROW_SHIFT = 2
+  PSCM_ROW_MASK = 0xC
 
 
 # LatCtlRampType_D_Rq in the frames that hand steering back to the driver (request 0): on a disengage,

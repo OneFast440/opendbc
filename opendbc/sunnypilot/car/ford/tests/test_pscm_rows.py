@@ -9,13 +9,17 @@ curvature asked for, a row needs both part numbers, and the firmware query asks 
 """
 import unittest
 
+import numpy as np
+
 from opendbc.car import structs
 from opendbc.car.ford.values import FORD_DATA_FILE_REQUEST, FORD_DATA_FILE_RESPONSE, FW_QUERY_CONFIG
 from opendbc.car.fw_query_definitions import StdQueries
+from opendbc.car.lateral import MAX_LATERAL_ACCEL
 from opendbc.sunnypilot.car.ford.lateral_angle_ext import LateralAngleExt
 from opendbc.sunnypilot.car.ford.pscm_rows import PSCM_ROWS, pscm_row
 from opendbc.sunnypilot.car.ford.tests.helpers import make_actuators, make_car_params, make_cc, make_cc_sp, make_cs
-from opendbc.sunnypilot.car.ford.values_ext import PrimaryLateralControl
+from opendbc.sunnypilot.car.ford.values_ext import FordSafetyFlagsSP, PrimaryLateralControl
+from opendbc.sunnypilot.car.interfaces import _initialize_ford
 
 Ecu = structs.CarParams.Ecu
 RAPTOR = PSCM_ROWS[(b'ML3V-14D003-BC', b'PL3V-14D007-CB')]
@@ -142,6 +146,57 @@ class TestAngleModeOnARow(unittest.TestCase):
   def test_extended_mode_test_uses_mode_2s_preview_time(self):
     lat = self._lat([PROGRAM, DATA_FILE], extended_mode_test=True)
     self.assertAlmostEqual(lat.module_t, 4.7, places=6)
+
+  def test_path_angle_is_held_inside_the_bound(self):
+    """A request past comma's lateral acceleration cap stops at the controller's bound, inside the panda's."""
+    v, kappa = 30.0, 6.0 / 30.0 ** 2   # 6 m/s^2
+    lat = self._lat([PROGRAM, DATA_FILE])
+    result = self._settle(lat, v, kappa, frames=120)
+    self.assertAlmostEqual(result.path_angle, RAPTOR.max_path_angle(v), places=6)
+    self.assertLess(result.path_angle, RAPTOR.panda_max_path_angle(v))
+    # what the module then targets, at its own gain, stays under the cap
+    self.assertLess(RAPTOR.k2_at(v * 3.6, 5.0) * result.path_angle * v ** 2, MAX_LATERAL_ACCEL)
+    # and every other truck is unbounded here, as before
+    self.assertAlmostEqual(self._settle(self._lat(), v, kappa, frames=120).path_angle, kappa * v * 0.95, places=6)
+
+
+class TestPscmRowBound(unittest.TestCase):
+  def test_k2_max_never_rises_with_speed(self):
+    speeds = np.arange(0.0, 60.0, 0.05)
+    k2 = [RAPTOR.k2_max(s) for s in speeds]
+    self.assertTrue(all(a >= b for a, b in zip(k2, k2[1:], strict=False)))
+    self.assertEqual(RAPTOR.k2_max(0.0), RAPTOR.k2[0])
+
+  def test_k2_max_covers_every_gain_the_module_can_use(self):
+    """Over every preview time T can reach, at every speed, the module's K2 is under the bound's (before the margin)."""
+    for v_kph in np.arange(0.5, 200.0, 0.5):
+      for t in np.arange(RAPTOR.t_min, RAPTOR.t_max + 1e-9, 0.05):
+        self.assertLessEqual(RAPTOR.k2_at(v_kph, t), RAPTOR.k2_max(v_kph / 3.6) + 1e-12, (v_kph, t))
+
+  def test_the_controllers_bound_is_inside_the_pandas(self):
+    """With the panda's lowest recent speed anywhere within 1 m/s of the controller's, the controller never sends
+    more than the panda allows."""
+    for v in np.arange(0.0, 50.0, 0.1):
+      for v_low in np.arange(max(v - 1.0, 0.0), v + 1.0 + 1e-9, 0.1):
+        self.assertLessEqual(RAPTOR.max_path_angle(v), RAPTOR.panda_max_path_angle(v_low) + 1e-12, (v, v_low))
+
+  def test_normal_driving_is_left_alone(self):
+    """Up to 2.5 m/s^2 the controller's own gain stays inside the bound everywhere the bound is under the signal's range."""
+    for v in np.arange(9.0, 45.0, 0.5):
+      kappa = 2.5 / v ** 2
+      self.assertLess(kappa / RAPTOR.k2_at(v * 3.6, 5.0), RAPTOR.max_path_angle(v), v)
+
+  def test_the_panda_hears_of_the_row_only_in_angle_mode(self):
+    for mode in PrimaryLateralControl:
+      for car_fw, row_bits in (([PROGRAM, DATA_FILE], RAPTOR.panda_row), ([PROGRAM], 0), ([DATA_FILE], 0), ([], 0)):
+        with self.subTest(mode=mode, entries=len(car_fw)):
+          CP, CP_SP = make_car_params()
+          CP.carFw = car_fw
+          _initialize_ford(CP, CP_SP, {"FordPrefLateralControl": str(int(mode))})
+          expected = row_bits if mode == PrimaryLateralControl.angle else 0
+          self.assertEqual((CP_SP.safetyParam & FordSafetyFlagsSP.PSCM_ROW_MASK) >> FordSafetyFlagsSP.PSCM_ROW_SHIFT,
+                           expected)
+          self.assertEqual(CP_SP.safetyParam & FordSafetyFlagsSP.LATERAL_MODE_MASK, int(mode))
 
 
 if __name__ == '__main__':

@@ -23,6 +23,7 @@ from opendbc.car.volkswagen.values import VolkswagenFlags
 from opendbc.car.toyota.values import ToyotaSafetyFlags
 from opendbc.sunnypilot.car.hyundai.enable_radar_tracks import enable_radar_tracks as hyundai_enable_radar_tracks
 from opendbc.sunnypilot.car.hyundai.longitudinal.helpers import LongitudinalTuningType
+from opendbc.sunnypilot.car.ford.pscm_rows import pscm_row
 from opendbc.sunnypilot.car.ford.values_ext import (
   BLEND_RATIO_RANGE,
   FordSafetyFlagsSP,
@@ -236,6 +237,13 @@ def _initialize_ford(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_d
   lateral.primaryControl = int(mode)
   # bits 0-1 of the SP safety param; the panda falls back to stock on anything it does not know
   CP_SP.safetyParam |= int(mode) & FordSafetyFlagsSP.LATERAL_MODE_MASK
+  # bits 2-3, angle mode only: the steering module, when its program and data file are a known row. The panda then
+  # bounds path angle by that module's own gain; angle mode's controller holds itself inside the same bound, from the
+  # same CP.carFw.
+  if mode == PrimaryLateralControl.angle:
+    row = pscm_row(CP.carFw)
+    if row is not None:
+      CP_SP.safetyParam |= (row.panda_row << FordSafetyFlagsSP.PSCM_ROW_SHIFT) & FordSafetyFlagsSP.PSCM_ROW_MASK
   # Every mode, stock included: how fast the PSCM lets go when steering is handed back. The panda does
   # not read the ramp type, so this needs no safety flag.
   quick_release = _bool_param(params_dict, "FordQuickDisengageRelease")

@@ -9,10 +9,12 @@ from opendbc.car.ford.values import FordSafetyFlags
 from opendbc.car.structs import CarParams
 from opendbc.safety.tests.common import RT_INTERVAL
 from opendbc.sunnypilot.car.ford.fordcan_ext import SHADOW_CURVATURE_SCALE
+from opendbc.sunnypilot.car.ford.pscm_rows import PSCM_ROWS
 from opendbc.sunnypilot.car.ford.values_ext import (
   CURV_MODE_PATH_ANGLE_MAX,
   FORD_DBC_PATH_ANGLE_MAX,
   FORD_DBC_PATH_ANGLE_MIN,
+  FordSafetyFlagsSP,
   PrimaryLateralControl,
 )
 from opendbc.safety.tests.libsafety import libsafety_py
@@ -625,7 +627,7 @@ class FordBluePilotSafetyHarness(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     if cls.__name__ in ("FordBluePilotSafetyHarness", "TestFordAngleControlSafetyBase",
-                        "TestFordCurvatureControlSafetyBase"):
+                        "TestFordCurvatureControlSafetyBase", "TestFordAngleControlRowSafetyBase"):
       raise unittest.SkipTest
 
   def setUp(self):
@@ -954,6 +956,84 @@ class TestFordCANFDAngleControlSafety(TestFordAngleControlSafetyBase):
   SAFETY_PARAM = FordSafetyFlags.CANFD
 
 
+RAPTOR_ROW = PSCM_ROWS[(b'ML3V-14D003-BC', b'PL3V-14D007-CB')]
+
+
+class TestFordAngleControlRowSafetyBase(TestFordAngleControlSafetyBase):
+  """Angle mode on a steering module openpilot matched at car init (pscm_rows): bits 2-3 of the SP param name it, and
+  path angle is bounded so that module's largest gain turns it into no more than comma's lateral acceleration cap.
+  Every angle-mode check above still applies."""
+  LATERAL_MODE = int(PrimaryLateralControl.angle) | (RAPTOR_ROW.panda_row << FordSafetyFlagsSP.PSCM_ROW_SHIFT)
+
+  @staticmethod
+  def _bound_counts(speed_low: float) -> int:
+    # in path angle counts (0.0005 rad), with the panda's own rounding: truncated, plus one count
+    return int(RAPTOR_ROW.panda_max_path_angle(speed_low) * 2000) + 1
+
+  def _ramp(self, speed: float, target_counts: int, sign: int) -> bool:
+    """Ramp path angle from zero to the target, each step inside the rate limit; True if every frame was allowed."""
+    step = max(1, int(self._path_angle_roc(speed) * 2000 * 0.9))
+    counts, ok = 0, True
+    while counts < target_counts:
+      counts = min(counts + step, target_counts)
+      ok = self._tx(self._lat_ctl_msg(True, sign * counts * 0.0005)) and ok
+    return ok
+
+  def _set_sp_param(self, sp_param: int):
+    self.safety.set_current_safety_param_sp(sp_param)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.ford, self.SAFETY_PARAM)
+    self.safety.init_tests()
+    self.safety.set_current_safety_param_sp(sp_param)
+
+  def test_path_angle_can_reach_the_full_dbc_range(self):
+    """Below about 9 m/s the module's bound is wider than the signal itself, so the whole range is still reachable."""
+    speed = 5.0
+    self.assertGreater(RAPTOR_ROW.panda_max_path_angle(speed), FORD_DBC_PATH_ANGLE_MAX)
+    for sign, limit in ((1, FORD_DBC_PATH_ANGLE_MAX), (-1, FORD_DBC_PATH_ANGLE_MIN)):
+      self._engage(speed)
+      self.assertTrue(self._ramp(speed, round(abs(limit) * 2000), sign), f"blocked ramping to {limit}")
+
+  def test_path_angle_is_bounded_by_the_modules_gain(self):
+    for speed in (10.0, 15.0, 20.0, 30.0, 40.0):
+      bound = self._bound_counts(speed)
+      self.assertLess(bound, 1000)
+      for sign in (1, -1):
+        with self.subTest(speed=speed, sign=sign):
+          # two counts of guard either side for the panda's float32 against this float64
+          self._engage(speed)
+          self.assertTrue(self._ramp(speed, bound - 2, sign), "blocked inside the bound")
+          self.assertFalse(self._tx(self._lat_ctl_msg(True, sign * (bound + 2) * 0.0005)), "allowed past the bound")
+
+  def test_the_bound_is_read_at_the_lowest_recent_speed(self):
+    """Five speed samples at 20 m/s and the newest at 30: the bound is 20 m/s's (the larger K2, and comma's cap read at
+    the lowest speed), so a path angle between the two bounds is allowed."""
+    self._engage(20.0)
+    self._rx(self._speed_msg(30.0))
+    self._rx(self._speed_msg_2(30.0))
+    self._rx(self._yaw_rate_msg(0.0, 30.0))
+    between = (self._bound_counts(30.0) + self._bound_counts(20.0)) // 2
+    self.assertTrue(self._ramp(20.0, between, 1))
+    self.assertFalse(self._tx(self._lat_ctl_msg(True, (self._bound_counts(20.0) + 2) * 0.0005)))
+
+  def test_an_unknown_module_keeps_the_signal_range(self):
+    """An index this firmware does not know bounds nothing, as before: path angle keeps the signal's whole range."""
+    for row in (0, 2, 3):
+      with self.subTest(row=row):
+        self._set_sp_param(int(PrimaryLateralControl.angle) | (row << FordSafetyFlagsSP.PSCM_ROW_SHIFT))
+        self._engage(30.0)
+        self.assertTrue(self._ramp(30.0, round(FORD_DBC_PATH_ANGLE_MAX * 2000), 1))
+
+
+class TestFordAngleControlRowSafety(TestFordAngleControlRowSafetyBase):
+  STEER_MESSAGE = MSG_LateralMotionControl
+  SAFETY_PARAM = 0
+
+
+class TestFordCANFDAngleControlRowSafety(TestFordAngleControlRowSafetyBase):
+  STEER_MESSAGE = MSG_LateralMotionControl2
+  SAFETY_PARAM = FordSafetyFlags.CANFD
+
+
 class TestFordCurvatureControlSafetyBase(FordBluePilotSafetyHarness):
   """Curvature mode keeps c2 as the actuator, so the stock curvature protections still apply and
   are covered by the whole-suite subclasses below. These cover what curvature mode adds: a c1
@@ -1025,6 +1105,14 @@ class TestFordCurvatureControlSafety(TestFordCurvatureControlSafetyBase):
 class TestFordCANFDCurvatureControlSafety(TestFordCurvatureControlSafetyBase):
   STEER_MESSAGE = MSG_LateralMotionControl2
   SAFETY_PARAM = FordSafetyFlags.CANFD
+
+
+class TestFordCANFDCurvatureControlRowBitsSafety(TestFordCurvatureControlSafetyBase):
+  """The steering module bits mean nothing outside angle mode: curvature mode with them set is curvature mode (its
+  0.25 rad trim cap is reachable at 20 m/s, where the module's bound would stop at 0.21)."""
+  STEER_MESSAGE = MSG_LateralMotionControl2
+  SAFETY_PARAM = FordSafetyFlags.CANFD
+  LATERAL_MODE = int(PrimaryLateralControl.curvature) | (RAPTOR_ROW.panda_row << FordSafetyFlagsSP.PSCM_ROW_SHIFT)
 
 
 class CurvatureModeMixin:

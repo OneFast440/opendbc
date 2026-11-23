@@ -543,6 +543,11 @@ class LateralAngleExt:
     if self.delivery_comp_enabled:
       gain *= self.delivery_comp
     path_angle = kappa_cmd * v_ego * gain
+    # On a module row the panda bounds what the module turns path angle into (comma's lateral acceleration cap over the
+    # module's largest gain); hold the command inside that, read a little more tightly, so no frame is refused.
+    if self.module_row is not None:
+      path_angle_limit = self.module_row.max_path_angle(v_ego)
+      path_angle = float(clip(path_angle, -path_angle_limit, path_angle_limit))
 
     # *** saturation handling ***
     if saturated:
