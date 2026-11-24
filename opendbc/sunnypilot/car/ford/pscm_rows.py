@@ -37,9 +37,12 @@ from opendbc.car.lateral import MAX_LATERAL_ACCEL
 Ecu = structs.CarParams.Ecu
 
 # How much higher the module's K2 may be than the panda's lookup: the module reads its own speed, which may be a few
-# percent below the panda's (1.027 needed on the executed fixed point and speed chain of the
-# 2021-23 F-150's newer library, plus 6 % allowed for chains not run).
+# percent below the panda's (1.027 needed on the executed fixed point and speed chain of the 2021-23 F-150's newer
+# library, plus 6 % allowed for chains not run).
 PANDA_K2_MARGIN = 1.10
+
+# One count of the path angle signal, rad: the controller's bound keeps at least this far inside the panda's.
+PATH_ANGLE_COUNT = 0.0005
 
 
 @dataclass(frozen=True)
@@ -99,9 +102,10 @@ class PscmRow:
     return MAX_LATERAL_ACCEL / fudged_speed ** 2 / self.k2_max(speed_low)
 
   def max_path_angle(self, v_ego: float) -> float:
-    """The controller's own bound, rad: the cap at its own speed and K2 read 1 m/s lower. Inside the panda's whenever
-    the panda's lowest recent speed is within 1 m/s of v_ego."""
-    return MAX_LATERAL_ACCEL / max(v_ego, 1.0) ** 2 / self.k2_max(max(v_ego - 1.0, 0.0))
+    """The controller's own bound, rad: the cap at its own speed over the largest K2 there, one signal count under.
+    Inside the panda's whenever the panda's lowest recent speed is within 1 m/s of v_ego: a lower speed opens more
+    room through the panda's 1 m/s fudge than its larger K2 takes, and a higher one has the smaller K2."""
+    return MAX_LATERAL_ACCEL / max(v_ego, 1.0) ** 2 / self.k2_max(v_ego) - PATH_ANGLE_COUNT
 
 
 # Read from each data file through the program's layout (RAM = data address + 0xFED4F58C for ML3V-14D003-BC), the

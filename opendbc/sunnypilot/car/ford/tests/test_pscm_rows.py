@@ -7,6 +7,7 @@ See the LICENSE.md file in the root directory for more details.
 Steering module rows: the law gives the module's own lookups, angle mode on a row makes the module target exactly the
 curvature asked for, a row needs both part numbers, and the firmware query asks the steering module for its data file.
 """
+import math
 import unittest
 
 import numpy as np
@@ -174,11 +175,21 @@ class TestPscmRowBound(unittest.TestCase):
         self.assertLessEqual(RAPTOR.k2_at(v_kph, t), RAPTOR.k2_max(v_kph / 3.6) + 1e-12, (v_kph, t))
 
   def test_the_controllers_bound_is_inside_the_pandas(self):
-    """With the panda's lowest recent speed anywhere within 1 m/s of the controller's, the controller never sends
-    more than the panda allows."""
-    for v in np.arange(0.0, 50.0, 0.1):
+    """With the panda's lowest recent speed anywhere within 1 m/s of the controller's, the controller's bound as the
+    packer rounds it is at least one count under the panda's (ford.h: the bound in counts plus one, truncated)."""
+    for v in np.arange(0.0, 50.0, 0.05):
+      sent = math.floor(RAPTOR.max_path_angle(v) * 2000.0 + 0.5)
       for v_low in np.arange(max(v - 1.0, 0.0), v + 1.0 + 1e-9, 0.1):
-        self.assertLessEqual(RAPTOR.max_path_angle(v), RAPTOR.panda_max_path_angle(v_low) + 1e-12, (v, v_low))
+        allowed = int(RAPTOR.panda_max_path_angle(v_low) * 2000.0 + 1.0)
+        self.assertGreaterEqual(allowed - sent, 1, (v, v_low))
+
+  def test_a_full_flat_road_request_passes_at_winding_road_speeds(self):
+    """controlsd asks for at most 3.0 m/s^2 on a flat road. From 8 to 22 m/s (29-79 km/h) the module's target for that
+    request is inside the controller's bound; higher, the bound's preview-time floor and margin still trim it a little,
+    and lower, the path angle signal's own range is what is left."""
+    for v in np.arange(8.0, 22.0 + 1e-9, 0.25):
+      kappa = 3.0 / v ** 2
+      self.assertLess(kappa / RAPTOR.k2_at(v * 3.6, 5.0), RAPTOR.max_path_angle(v), v)
 
   def test_normal_driving_is_left_alone(self):
     """Up to 2.5 m/s^2 the controller's own gain stays inside the bound everywhere the bound is under the signal's range."""
