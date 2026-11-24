@@ -95,17 +95,18 @@ class PscmRow:
     d = min(d_high, max(0.28 * v_kph * self.t_min, d_low))
     return min(float(np.interp(d, self.k2_distances, self.k2)) * PANDA_K2_MARGIN, self.k2[0])
 
-  def panda_max_path_angle(self, speed_low: float) -> float:
+  def panda_max_path_angle(self, speed_low: float, max_lateral_accel: float = MAX_LATERAL_ACCEL) -> float:
     """The panda's bound on path angle, rad, at its lowest recent speed (ford.h ford_pscm_path_angle_checks, before its
-    one-count rounding allowance): comma's cap at that speed less 1 m/s over the largest K2 there."""
+    one-count rounding allowance): the cap (comma's, or the driver's higher one) at that speed less 1 m/s over the
+    largest K2 there."""
     fudged_speed = max(speed_low - 1.0, 1.0)
-    return MAX_LATERAL_ACCEL / fudged_speed ** 2 / self.k2_max(speed_low)
+    return max_lateral_accel / fudged_speed ** 2 / self.k2_max(speed_low)
 
-  def max_path_angle(self, v_ego: float) -> float:
+  def max_path_angle(self, v_ego: float, max_lateral_accel: float = MAX_LATERAL_ACCEL) -> float:
     """The controller's own bound, rad: the cap at its own speed over the largest K2 there, one signal count under.
     Inside the panda's whenever the panda's lowest recent speed is within 1 m/s of v_ego: a lower speed opens more
     room through the panda's 1 m/s fudge than its larger K2 takes, and a higher one has the smaller K2."""
-    return MAX_LATERAL_ACCEL / max(v_ego, 1.0) ** 2 / self.k2_max(v_ego) - PATH_ANGLE_COUNT
+    return max_lateral_accel / max(v_ego, 1.0) ** 2 / self.k2_max(v_ego) - PATH_ANGLE_COUNT
 
 
 # Read from each data file through the program's layout (RAM = data address + 0xFED4F58C for ML3V-14D003-BC), the

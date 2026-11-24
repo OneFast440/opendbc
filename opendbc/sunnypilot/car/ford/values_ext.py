@@ -29,9 +29,9 @@ Background: https://bluepilot.dev/announcements/
 from collections import namedtuple
 from enum import IntEnum
 
-from opendbc.car import structs
+from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, structs
 from opendbc.car.ford.values import CAR
-from opendbc.car.lateral import AngleSteeringLimits
+from opendbc.car.lateral import AVERAGE_ROAD_ROLL, AngleSteeringLimits
 
 ButtonType = structs.CarState.ButtonEvent.Type
 Button = namedtuple('Button', ['event_type', 'can_addr', 'can_msg', 'values'])
@@ -63,10 +63,15 @@ class FordSafetyFlagsSP:
   Bits 2-3 carry, in angle mode only, the steering module row openpilot matched at car init
   (pscm_rows.PscmRow.panda_row): the panda then bounds path angle by that module's own gain. 0 is
   no known module, and leaves path angle its signal's own range.
+
+  Bit 4, set only with a row, is the driver's higher lateral acceleration ceiling
+  (FORD_HIGHER_LATERAL_ACCEL): the panda's bound rises from comma's cap to it. It means nothing
+  without a row, since only a row's bound reads it.
   """
   LATERAL_MODE_MASK = 0x3
   PSCM_ROW_SHIFT = 2
   PSCM_ROW_MASK = 0xC
+  HIGHER_LATERAL_ACCEL = 0x10
 
 
 # LatCtlRampType_D_Rq in the frames that hand steering back to the driver (request 0): on a disengage,
@@ -78,6 +83,14 @@ class FordSafetyFlagsSP:
 # CP_SP.fordLateralTuning.releaseRampType. Angle mode's short reset pulses always send 0.
 RELEASE_RAMP_TYPE_STOCK = 0
 RELEASE_RAMP_TYPE_QUICK = 3
+
+# The driver's higher lateral acceleration ceiling (FordHigherLateralAccel_ang), m/s^2 on a flat road, in place of
+# comma's 3.0 (ISO 11270): controlsd's clip lets the plan ask for up to this, and the panda's angle-mode bound rises
+# by the same 1.0 m/s^2 over the same road-bank allowance comma adds. Angle mode on a matched steering module only,
+# because the panda can only check what a path angle asks for with that module's own gain. Jerk and every other
+# limit are unchanged.
+FORD_HIGHER_LATERAL_ACCEL = 4.0
+FORD_HIGHER_MAX_LATERAL_ACCEL = FORD_HIGHER_LATERAL_ACCEL + (ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL)  # ~4.6
 
 
 # Ford cruise control buttons live in Steering_Data_FD1 (CAN id 131) as 1-bit flags.

@@ -62,6 +62,7 @@ class CarParamsSP:
   pcmCruiseSpeed: bool = auto_field()
   intelligentCruiseButtonManagementAvailable: bool = auto_field()
   enableGasInterceptor: bool = auto_field()
+  maxLateralAccel: float = auto_field()  # flat-road ceiling for controlsd's curvature clip, m/s^2; 0 keeps comma's 3.0
 
   neuralNetworkLateralControl: 'CarParamsSP.NeuralNetworkLateralControl' = field(default_factory=lambda: CarParamsSP.NeuralNetworkLateralControl())
   fordLateralTuning: 'CarParamsSP.FordLateralTuning' = field(default_factory=lambda: CarParamsSP.FordLateralTuning())

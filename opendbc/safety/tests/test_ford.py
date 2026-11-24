@@ -14,6 +14,7 @@ from opendbc.sunnypilot.car.ford.values_ext import (
   CURV_MODE_PATH_ANGLE_MAX,
   FORD_DBC_PATH_ANGLE_MAX,
   FORD_DBC_PATH_ANGLE_MIN,
+  FORD_HIGHER_MAX_LATERAL_ACCEL,
   FordSafetyFlagsSP,
   PrimaryLateralControl,
 )
@@ -627,7 +628,8 @@ class FordBluePilotSafetyHarness(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     if cls.__name__ in ("FordBluePilotSafetyHarness", "TestFordAngleControlSafetyBase",
-                        "TestFordCurvatureControlSafetyBase", "TestFordAngleControlRowSafetyBase"):
+                        "TestFordCurvatureControlSafetyBase", "TestFordAngleControlRowSafetyBase",
+                        "TestFordAngleControlHigherRowSafetyBase"):
       raise unittest.SkipTest
 
   def setUp(self):
@@ -963,12 +965,15 @@ class TestFordAngleControlRowSafetyBase(TestFordAngleControlSafetyBase):
   """Angle mode on a steering module openpilot matched at car init (pscm_rows): bits 2-3 of the SP param name it, and
   path angle is bounded so that module's largest gain turns it into no more than comma's lateral acceleration cap.
   Every angle-mode check above still applies."""
+  HIGHER_BIT = 0
+  CEILING = MAX_LATERAL_ACCEL
+  BOUND_SPEEDS = (10.0, 15.0, 20.0, 30.0, 40.0)
   LATERAL_MODE = int(PrimaryLateralControl.angle) | (RAPTOR_ROW.panda_row << FordSafetyFlagsSP.PSCM_ROW_SHIFT)
 
-  @staticmethod
-  def _bound_counts(speed_low: float) -> int:
+  @classmethod
+  def _bound_counts(cls, speed_low: float) -> int:
     # in path angle counts (0.0005 rad), with the panda's own rounding: truncated, plus one count
-    return int(RAPTOR_ROW.panda_max_path_angle(speed_low) * 2000) + 1
+    return int(RAPTOR_ROW.panda_max_path_angle(speed_low, cls.CEILING) * 2000) + 1
 
   def _ramp(self, speed: float, target_counts: int, sign: int) -> bool:
     """Ramp path angle from zero to the target, each step inside the rate limit; True if every frame was allowed."""
@@ -988,13 +993,13 @@ class TestFordAngleControlRowSafetyBase(TestFordAngleControlSafetyBase):
   def test_path_angle_can_reach_the_full_dbc_range(self):
     """Below about 9 m/s the module's bound is wider than the signal itself, so the whole range is still reachable."""
     speed = 5.0
-    self.assertGreater(RAPTOR_ROW.panda_max_path_angle(speed), FORD_DBC_PATH_ANGLE_MAX)
+    self.assertGreater(RAPTOR_ROW.panda_max_path_angle(speed, self.CEILING), FORD_DBC_PATH_ANGLE_MAX)
     for sign, limit in ((1, FORD_DBC_PATH_ANGLE_MAX), (-1, FORD_DBC_PATH_ANGLE_MIN)):
       self._engage(speed)
       self.assertTrue(self._ramp(speed, round(abs(limit) * 2000), sign), f"blocked ramping to {limit}")
 
   def test_path_angle_is_bounded_by_the_modules_gain(self):
-    for speed in (10.0, 15.0, 20.0, 30.0, 40.0):
+    for speed in self.BOUND_SPEEDS:
       bound = self._bound_counts(speed)
       self.assertLess(bound, 1000)
       for sign in (1, -1):
@@ -1019,7 +1024,7 @@ class TestFordAngleControlRowSafetyBase(TestFordAngleControlSafetyBase):
     """An index this firmware does not know bounds nothing, as before: path angle keeps the signal's whole range."""
     for row in (0, 2, 3):
       with self.subTest(row=row):
-        self._set_sp_param(int(PrimaryLateralControl.angle) | (row << FordSafetyFlagsSP.PSCM_ROW_SHIFT))
+        self._set_sp_param(int(PrimaryLateralControl.angle) | (row << FordSafetyFlagsSP.PSCM_ROW_SHIFT) | self.HIGHER_BIT)
         self._engage(30.0)
         self.assertTrue(self._ramp(30.0, round(FORD_DBC_PATH_ANGLE_MAX * 2000), 1))
 
@@ -1030,6 +1035,37 @@ class TestFordAngleControlRowSafety(TestFordAngleControlRowSafetyBase):
 
 
 class TestFordCANFDAngleControlRowSafety(TestFordAngleControlRowSafetyBase):
+  STEER_MESSAGE = MSG_LateralMotionControl2
+  SAFETY_PARAM = FordSafetyFlags.CANFD
+
+
+class TestFordAngleControlHigherRowSafetyBase(TestFordAngleControlRowSafetyBase):
+  """The same module with bit 4, the driver's higher ceiling: every check above, with the bound at 4.0 m/s^2 plus the
+  road-bank allowance instead of comma's 3.0. An unknown module with bit 4 still keeps the signal's whole range."""
+  HIGHER_BIT = FordSafetyFlagsSP.HIGHER_LATERAL_ACCEL
+  CEILING = FORD_HIGHER_MAX_LATERAL_ACCEL
+  BOUND_SPEEDS = (15.0, 20.0, 30.0, 40.0)  # at 10 m/s this bound is already past the signal's range
+  LATERAL_MODE = TestFordAngleControlRowSafetyBase.LATERAL_MODE | FordSafetyFlagsSP.HIGHER_LATERAL_ACCEL
+
+  def test_bit_4_opens_room_that_commas_cap_refuses(self):
+    """Halfway between comma's bound and the higher one at 30 m/s: allowed with bit 4, refused without it."""
+    speed = 30.0
+    commas = int(RAPTOR_ROW.panda_max_path_angle(speed) * 2000) + 1
+    between = (commas + self._bound_counts(speed)) // 2
+    self.assertGreater(between, commas + 2)
+    self._engage(speed)
+    self.assertTrue(self._ramp(speed, between, 1), "blocked under the higher ceiling")
+    self._set_sp_param(self.LATERAL_MODE & ~FordSafetyFlagsSP.HIGHER_LATERAL_ACCEL)
+    self._engage(speed)
+    self.assertFalse(self._ramp(speed, between, 1), "allowed past comma's cap without bit 4")
+
+
+class TestFordAngleControlHigherRowSafety(TestFordAngleControlHigherRowSafetyBase):
+  STEER_MESSAGE = MSG_LateralMotionControl
+  SAFETY_PARAM = 0
+
+
+class TestFordCANFDAngleControlHigherRowSafety(TestFordAngleControlHigherRowSafetyBase):
   STEER_MESSAGE = MSG_LateralMotionControl2
   SAFETY_PARAM = FordSafetyFlags.CANFD
 
@@ -1108,11 +1144,12 @@ class TestFordCANFDCurvatureControlSafety(TestFordCurvatureControlSafetyBase):
 
 
 class TestFordCANFDCurvatureControlRowBitsSafety(TestFordCurvatureControlSafetyBase):
-  """The steering module bits mean nothing outside angle mode: curvature mode with them set is curvature mode (its
-  0.25 rad trim cap is reachable at 20 m/s, where the module's bound would stop at 0.21)."""
+  """The steering module bits and bit 4 mean nothing outside angle mode: curvature mode with them set is curvature mode
+  (its 0.25 rad trim cap is reachable at 20 m/s, where the module's bound would stop at 0.21)."""
   STEER_MESSAGE = MSG_LateralMotionControl2
   SAFETY_PARAM = FordSafetyFlags.CANFD
-  LATERAL_MODE = int(PrimaryLateralControl.curvature) | (RAPTOR_ROW.panda_row << FordSafetyFlagsSP.PSCM_ROW_SHIFT)
+  LATERAL_MODE = (int(PrimaryLateralControl.curvature) | (RAPTOR_ROW.panda_row << FordSafetyFlagsSP.PSCM_ROW_SHIFT) |
+                  FordSafetyFlagsSP.HIGHER_LATERAL_ACCEL)
 
 
 class CurvatureModeMixin:

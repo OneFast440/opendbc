@@ -19,7 +19,9 @@ from opendbc.car.lateral import MAX_LATERAL_ACCEL
 from opendbc.sunnypilot.car.ford.lateral_angle_ext import LateralAngleExt
 from opendbc.sunnypilot.car.ford.pscm_rows import PSCM_ROWS, pscm_row
 from opendbc.sunnypilot.car.ford.tests.helpers import make_actuators, make_car_params, make_cc, make_cc_sp, make_cs
-from opendbc.sunnypilot.car.ford.values_ext import FordSafetyFlagsSP, PrimaryLateralControl
+from opendbc.sunnypilot.car.ford.values_ext import (FORD_DBC_PATH_ANGLE_MAX, FORD_DBC_PATH_ANGLE_MIN,
+                                                    FORD_HIGHER_LATERAL_ACCEL, FORD_HIGHER_MAX_LATERAL_ACCEL,
+                                                    FordSafetyFlagsSP, PrimaryLateralControl)
 from opendbc.sunnypilot.car.interfaces import _initialize_ford
 
 Ecu = structs.CarParams.Ecu
@@ -114,9 +116,10 @@ class TestAngleModeOnARow(unittest.TestCase):
     return result
 
   @staticmethod
-  def _lat(car_fw=(), **tuning):
+  def _lat(car_fw=(), sp_bits=0, **tuning):
     CP, CP_SP = make_car_params(mode=PrimaryLateralControl.angle, **tuning)
     CP.carFw = list(car_fw)
+    CP_SP.safetyParam |= sp_bits
     return LateralAngleExt(CP, CP_SP)
 
   def test_path_angle_is_sized_by_the_modules_gain(self):
@@ -160,6 +163,20 @@ class TestAngleModeOnARow(unittest.TestCase):
     # and every other truck is unbounded here, as before
     self.assertAlmostEqual(self._settle(self._lat(), v, kappa, frames=120).path_angle, kappa * v * 0.95, places=6)
 
+  def test_bit_4_raises_the_controllers_ceiling(self):
+    """With bit 4 the same request stops at the higher ceiling's bound, inside the panda's higher one: past what
+    comma's cap allows, short of the higher cap. Without a row, bit 4 changes nothing."""
+    v, kappa = 30.0, 6.0 / 30.0 ** 2
+    higher = self._lat([PROGRAM, DATA_FILE], sp_bits=FordSafetyFlagsSP.HIGHER_LATERAL_ACCEL)
+    self.assertEqual(higher.max_lateral_accel, FORD_HIGHER_MAX_LATERAL_ACCEL)
+    result = self._settle(higher, v, kappa, frames=120)
+    self.assertAlmostEqual(result.path_angle, RAPTOR.max_path_angle(v, FORD_HIGHER_MAX_LATERAL_ACCEL), places=6)
+    self.assertLess(result.path_angle, RAPTOR.panda_max_path_angle(v, FORD_HIGHER_MAX_LATERAL_ACCEL))
+    target = RAPTOR.k2_at(v * 3.6, 5.0) * result.path_angle * v ** 2
+    self.assertTrue(MAX_LATERAL_ACCEL < target < FORD_HIGHER_MAX_LATERAL_ACCEL, target)
+    self.assertEqual(self._lat([PROGRAM, DATA_FILE]).max_lateral_accel, MAX_LATERAL_ACCEL)
+    self.assertEqual(self._lat(sp_bits=FordSafetyFlagsSP.HIGHER_LATERAL_ACCEL).max_lateral_accel, MAX_LATERAL_ACCEL)
+
 
 class TestPscmRowBound(unittest.TestCase):
   def test_k2_max_never_rises_with_speed(self):
@@ -177,11 +194,12 @@ class TestPscmRowBound(unittest.TestCase):
   def test_the_controllers_bound_is_inside_the_pandas(self):
     """With the panda's lowest recent speed anywhere within 1 m/s of the controller's, the controller's bound as the
     packer rounds it is at least one count under the panda's (ford.h: the bound in counts plus one, truncated)."""
-    for v in np.arange(0.0, 50.0, 0.05):
-      sent = math.floor(RAPTOR.max_path_angle(v) * 2000.0 + 0.5)
-      for v_low in np.arange(max(v - 1.0, 0.0), v + 1.0 + 1e-9, 0.1):
-        allowed = int(RAPTOR.panda_max_path_angle(v_low) * 2000.0 + 1.0)
-        self.assertGreaterEqual(allowed - sent, 1, (v, v_low))
+    for ceiling in (MAX_LATERAL_ACCEL, FORD_HIGHER_MAX_LATERAL_ACCEL):
+      for v in np.arange(0.0, 50.0, 0.05):
+        sent = math.floor(RAPTOR.max_path_angle(v, ceiling) * 2000.0 + 0.5)
+        for v_low in np.arange(max(v - 1.0, 0.0), v + 1.0 + 1e-9, 0.1):
+          allowed = int(RAPTOR.panda_max_path_angle(v_low, ceiling) * 2000.0 + 1.0)
+          self.assertGreaterEqual(allowed - sent, 1, (ceiling, v, v_low))
 
   def test_a_full_flat_road_request_passes_at_winding_road_speeds(self):
     """controlsd asks for at most 3.0 m/s^2 on a flat road. From 8 to 22 m/s (29-79 km/h) the module's target for that
@@ -190,6 +208,28 @@ class TestPscmRowBound(unittest.TestCase):
     for v in np.arange(8.0, 22.0 + 1e-9, 0.25):
       kappa = 3.0 / v ** 2
       self.assertLess(kappa / RAPTOR.k2_at(v * 3.6, 5.0), RAPTOR.max_path_angle(v), v)
+
+  def test_the_higher_ceiling_lets_4_m_s2_through(self):
+    """With bit 4 controlsd may ask for 4.0 m/s^2 on a flat road. From 9.5 to 22 m/s (34-79 km/h) that request is
+    inside both the controller's bound and the path angle signal's range; the module then targets exactly it."""
+    for v in np.arange(9.5, 22.0 + 1e-9, 0.25):
+      path_angle = (FORD_HIGHER_LATERAL_ACCEL / v ** 2) / RAPTOR.k2_at(v * 3.6, 5.0)
+      self.assertLess(path_angle, RAPTOR.max_path_angle(v, FORD_HIGHER_MAX_LATERAL_ACCEL), v)
+      self.assertLess(path_angle, min(FORD_DBC_PATH_ANGLE_MAX, -FORD_DBC_PATH_ANGLE_MIN), v)  # either direction
+
+  def test_bit_4_needs_angle_mode_a_row_and_the_setting(self):
+    """Car init sets bit 4 and controlsd's 4.0 ceiling together, and only in angle mode with a matched module and the
+    setting on; everywhere else both stay at comma's (bit clear, ceiling 0 for controlsd's own 3.0)."""
+    for mode in PrimaryLateralControl:
+      for car_fw in ([PROGRAM, DATA_FILE], [PROGRAM], []):
+        for setting in ("0", "1"):
+          with self.subTest(mode=mode, entries=len(car_fw), setting=setting):
+            CP, CP_SP = make_car_params()
+            CP.carFw = car_fw
+            _initialize_ford(CP, CP_SP, {"FordPrefLateralControl": str(int(mode)), "FordHigherLateralAccel_ang": setting})
+            on = mode == PrimaryLateralControl.angle and len(car_fw) == 2 and setting == "1"
+            self.assertEqual(bool(CP_SP.safetyParam & FordSafetyFlagsSP.HIGHER_LATERAL_ACCEL), on)
+            self.assertEqual(CP_SP.maxLateralAccel, FORD_HIGHER_LATERAL_ACCEL if on else 0.0)
 
   def test_normal_driving_is_left_alone(self):
     """Up to 2.5 m/s^2 the controller's own gain stays inside the bound everywhere the bound is under the signal's range."""

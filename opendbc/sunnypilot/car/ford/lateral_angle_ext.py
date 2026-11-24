@@ -30,6 +30,7 @@ from numpy import clip, interp
 from opendbc.car import DT_CTRL
 from opendbc.car.carlog import carlog
 from opendbc.car.ford.values import CarControllerParams
+from opendbc.car.lateral import MAX_LATERAL_ACCEL
 from opendbc.sunnypilot.car.ford.human_turn import HumanTurnDetector
 from opendbc.sunnypilot.car.ford.lateral_common import (INACTIVE_RESULT, RESTART_PULSE_RESULT, FordLateralResult,
                                                         get_current_curvature)
@@ -37,6 +38,8 @@ from opendbc.sunnypilot.car.ford.pscm_rows import pscm_row
 from opendbc.sunnypilot.car.ford.values_ext import (
   FORD_DBC_PATH_ANGLE_MAX,
   FORD_DBC_PATH_ANGLE_MIN,
+  FORD_HIGHER_MAX_LATERAL_ACCEL,
+  FordSafetyFlagsSP,
   HIGH_SPEED_DAMPENING_RANGE,
   HIGH_SPEED_FACTOR_RANGE,
   LANE_CHANGE_FACTOR_RANGE,
@@ -231,11 +234,15 @@ class LateralAngleExt:
     # module's own gain instead, so the module targets exactly the curvature asked for; the user factors below then
     # scale that, 1.0 being the module's own law. Anything else keeps the platform gains.
     self.module_row = pscm_row(CP.carFw)
+    # The bound's ceiling: comma's cap, or the driver's higher one when car init granted it (bit 4 of the SP param,
+    # which it sets only with a row). The panda reads the same bit, so the two ceilings cannot differ.
+    higher = self.module_row is not None and bool(CP_SP.safetyParam & FordSafetyFlagsSP.HIGHER_LATERAL_ACCEL)
+    self.max_lateral_accel = FORD_HIGHER_MAX_LATERAL_ACCEL if higher else MAX_LATERAL_ACCEL
     if self.module_row is not None:
       self.module_t = self.module_row.t_for_mode(2 if tuning.extendedModeTest else 1)
       self.module_hold_kph = self.module_row.hold_kph(self.module_t)
-      carlog.warning("Ford angle mode: path angle by the steering module's own gain (%s + %s)",
-                     self.module_row.program.decode(), self.module_row.data_file.decode())
+      carlog.warning("Ford angle mode: path angle by the steering module's own gain (%s + %s), ceiling %.2f m/s^2",
+                     self.module_row.program.decode(), self.module_row.data_file.decode(), self.max_lateral_accel)
 
     # User tuning. Read once at car init: the panda safety flag comes from the same read, and a
     # live flip against stale firmware would fight the panda.
@@ -543,10 +550,11 @@ class LateralAngleExt:
     if self.delivery_comp_enabled:
       gain *= self.delivery_comp
     path_angle = kappa_cmd * v_ego * gain
-    # On a module row the panda bounds what the module turns path angle into (comma's lateral acceleration cap over the
-    # module's largest gain); hold the command inside that, read a little more tightly, so no frame is refused.
+    # On a module row the panda bounds what the module turns path angle into (the lateral acceleration ceiling, comma's
+    # or the driver's higher one, over the module's largest gain); hold the command inside that, read a little more
+    # tightly, so no frame is refused.
     if self.module_row is not None:
-      path_angle_limit = self.module_row.max_path_angle(v_ego)
+      path_angle_limit = self.module_row.max_path_angle(v_ego, self.max_lateral_accel)
       path_angle = float(clip(path_angle, -path_angle_limit, path_angle_limit))
 
     # *** saturation handling ***

@@ -148,10 +148,15 @@ static int ford_shadow_curvature_to_can(int raw) {
 // the module can use at the lowest recent speed over every preview time it can reach, times a margin for the module
 // reading its own speed lower than the panda does. With no known module (0, or an index this firmware does not know)
 // path angle keeps the signal's own range, as before.
+//
+// Bit 4 is the driver's higher ceiling (FordHigherLateralAccel_ang): the cap's flat-road part rises from ISO 11270's
+// 3.0 m/s^2 to FORD_HIGHER_LATERAL_ACCEL, with the same road-bank allowance on top. Only a known module's bound reads
+// it, so without one it changes nothing.
 #define FORD_PSCM_ROW_ML3V_BC_PL3V_CB 1U  // ML3V-14D003-BC with data file PL3V-14D007-CB (F-150 Raptor)
 #define FORD_PSCM_SPEED_POINTS 8
 #define FORD_PSCM_K2_POINTS 10
 #define FORD_PSCM_K2_MARGIN 1.10f
+#define FORD_HIGHER_LATERAL_ACCEL 4.0f  // m/s^2, flat road
 
 typedef struct {
   float speeds_kph[FORD_PSCM_SPEED_POINTS];
@@ -163,6 +168,7 @@ typedef struct {
 } FordPscmRow;
 
 static const FordPscmRow *ford_pscm_row = NULL;  // set in ford_init, which holds each row's numbers
+static bool ford_higher_lateral_accel = false;   // bit 4, set in ford_init
 
 // safety_interpolate's rule (ends held, linear between points) over a table of any length
 static float ford_interp(const float *xs, const float *ys, int size, float x) {
@@ -195,7 +201,9 @@ static float ford_pscm_k2_max(const FordPscmRow *row, float speed) {
 static bool ford_pscm_path_angle_checks(int desired_path_angle) {
   bool violation = false;
   if (ford_pscm_row != NULL) {
-    const float max_lateral_accel = ISO_LATERAL_ACCEL + (EARTH_G * AVERAGE_ROAD_ROLL);  // ~3.6 m/s^2, comma's cap
+    // comma's cap (~3.6 m/s^2), or the driver's higher one (~4.6), each with the road-bank allowance
+    const float flat_lateral_accel = ford_higher_lateral_accel ? FORD_HIGHER_LATERAL_ACCEL : ISO_LATERAL_ACCEL;
+    const float max_lateral_accel = flat_lateral_accel + (EARTH_G * AVERAGE_ROAD_ROLL);
     // the lowest recent speed gives the largest K2; the cap's speed is fudged down by 1 m/s as comma's own check does
     const float speed = vehicle_speed.min / VEHICLE_SPEED_FACTOR;
     const float fudged_speed = SAFETY_MAX(speed - 1.0f, 1.0f);
@@ -726,6 +734,9 @@ static safety_config ford_init(uint16_t param) {
   const uint16_t FORD_PARAM_SP_PSCM_ROW_MASK = 0xCU;
   const uint16_t ford_pscm_row_index = (current_safety_param_sp & FORD_PARAM_SP_PSCM_ROW_MASK) >> 2U;
   ford_pscm_row = (ford_pscm_row_index == FORD_PSCM_ROW_ML3V_BC_PL3V_CB) ? &FORD_PSCM_ROW_RAPTOR : NULL;
+  // bit 4: the driver's higher lateral acceleration ceiling for that bound (openpilot sets it only with a row)
+  const uint16_t FORD_PARAM_SP_HIGHER_LATERAL_ACCEL = 0x10U;
+  ford_higher_lateral_accel = (current_safety_param_sp & FORD_PARAM_SP_HIGHER_LATERAL_ACCEL) != 0U;
 
   // sunnypilot: openpilot longitudinal follows the alpha longitudinal toggle on every Ford, so
   // ACCDATA is in the allowlist only when the toggle is on. Two changes from upstream:

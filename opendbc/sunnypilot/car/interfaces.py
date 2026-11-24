@@ -26,6 +26,7 @@ from opendbc.sunnypilot.car.hyundai.longitudinal.helpers import LongitudinalTuni
 from opendbc.sunnypilot.car.ford.pscm_rows import pscm_row
 from opendbc.sunnypilot.car.ford.values_ext import (
   BLEND_RATIO_RANGE,
+  FORD_HIGHER_LATERAL_ACCEL,
   FordSafetyFlagsSP,
   HIGH_SPEED_DAMPENING_RANGE,
   HIGH_SPEED_FACTOR_RANGE,
@@ -244,6 +245,12 @@ def _initialize_ford(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_d
     row = pscm_row(CP.carFw)
     if row is not None:
       CP_SP.safetyParam |= (row.panda_row << FordSafetyFlagsSP.PSCM_ROW_SHIFT) & FordSafetyFlagsSP.PSCM_ROW_MASK
+      # bit 4, with a row only: the driver's higher lateral acceleration ceiling. controlsd's clip, angle mode's
+      # controller and the panda's bound rise to it together; without a row the panda could not check it, so there
+      # the setting does nothing.
+      if _bool_param(params_dict, "FordHigherLateralAccel_ang"):
+        CP_SP.safetyParam |= FordSafetyFlagsSP.HIGHER_LATERAL_ACCEL
+        CP_SP.maxLateralAccel = FORD_HIGHER_LATERAL_ACCEL
   # Every mode, stock included: how fast the PSCM lets go when steering is handed back. The panda does
   # not read the ramp type, so this needs no safety flag.
   quick_release = _bool_param(params_dict, "FordQuickDisengageRelease")
