@@ -50,6 +50,12 @@ from opendbc.sunnypilot.car.ford.values_ext import (
 
 _STEER_DT = CarControllerParams.STEER_STEP * DT_CTRL  # 20 Hz lateral tick
 
+# path_angle goes out negated (the car controller sends Ford's sign, the opposite of openpilot's), so in openpilot's sign
+# its range is the signal's own mirrored: 0.5 rad to the left, 0.5235 to the right. Clipped to the signal's range as it
+# stands, a left command between 0.5 and 0.5235 rad wrapped on the wire to a right one, which the panda refused.
+_PATH_ANGLE_MIN = -FORD_DBC_PATH_ANGLE_MAX
+_PATH_ANGLE_MAX = -FORD_DBC_PATH_ANGLE_MIN
+
 # Blend of model-predicted curvature into the planner's desired curvature, validated on F-150
 # fleet data. 0 = planner only, 1 = model only.
 _PATH_ANGLE_BLEND_RATIO = 0.50
@@ -484,8 +490,8 @@ class LateralAngleExt:
     # enables it. angleState.saturated is not used as a proxy for either: it trips whenever the car
     # lags the commanded path_angle by > 2.5 deg, i.e. on any normal curve entry, which produced a
     # positive-feedback flat line (understeer -> saturated -> path_angle frozen -> more understeer).
-    dbc_saturated = (self.path_angle_last >= FORD_DBC_PATH_ANGLE_MAX * _DBC_SAT_FRACTION or
-                     self.path_angle_last <= FORD_DBC_PATH_ANGLE_MIN * _DBC_SAT_FRACTION)
+    dbc_saturated = (self.path_angle_last >= _PATH_ANGLE_MAX * _DBC_SAT_FRACTION or
+                     self.path_angle_last <= _PATH_ANGLE_MIN * _DBC_SAT_FRACTION)
     saturated = dbc_saturated or (self.sat_observer_enabled and self.pscm_attenuating)
     desired_falling = abs(desired_curvature) < abs(self.desired_curvature_last) - _EXIT_DESIRED_FALLING
     on_exit = not kappa_entering and (saturated or desired_falling)
@@ -566,7 +572,7 @@ class LateralAngleExt:
         limited = last_mag - _PSCM_SAT_UNWIND_RATE
         path_angle = float(limited if self.path_angle_last >= 0 else -limited)
 
-    path_angle = float(clip(path_angle, FORD_DBC_PATH_ANGLE_MIN, FORD_DBC_PATH_ANGLE_MAX))
+    path_angle = float(clip(path_angle, _PATH_ANGLE_MIN, _PATH_ANGLE_MAX))
 
     # *** soft rate limit ***
     soft_roc = float(interp(v_ego, _SOFT_ROC_SPEED_BP, _SOFT_ROC_V))

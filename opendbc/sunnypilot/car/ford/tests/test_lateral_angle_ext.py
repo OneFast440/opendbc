@@ -105,8 +105,9 @@ class TestLateralAngleExt(unittest.TestCase):
     for _ in range(200):
       result = lat.update(make_cc(), make_cc_sp(), make_cs(v_ego=35.0, yaw_rate=0.02 * 35.0),
                           make_actuators(0.02))
-      self.assertLessEqual(result.path_angle, FORD_DBC_PATH_ANGLE_MAX + 1e-9)
-      self.assertGreaterEqual(result.path_angle, FORD_DBC_PATH_ANGLE_MIN - 1e-9)
+      # sent negated: Ford's sign is what has to fit the signal
+      self.assertLessEqual(-result.path_angle, FORD_DBC_PATH_ANGLE_MAX + 1e-9)
+      self.assertGreaterEqual(-result.path_angle, FORD_DBC_PATH_ANGLE_MIN - 1e-9)
 
   def test_no_lateral_accel_ceiling(self):
     """BluePilot does not apply the ISO lateral acceleration ceiling in angle mode, so the
@@ -307,8 +308,21 @@ class TestAngleModeCommandFidelity(unittest.TestCase):
     """Removing the c2 clamp must not let c1 leave its own range."""
     ctrl = LateralAngleExt(*angle_params())
     res = self._drive(ctrl, 200, 0.5, 25.0)   # absurd request, on purpose
-    self.assertLessEqual(res.path_angle, FORD_DBC_PATH_ANGLE_MAX + 1e-9)
-    self.assertGreaterEqual(res.path_angle, FORD_DBC_PATH_ANGLE_MIN - 1e-9)
+    self.assertLessEqual(-res.path_angle, FORD_DBC_PATH_ANGLE_MAX + 1e-9)     # sent negated
+    self.assertGreaterEqual(-res.path_angle, FORD_DBC_PATH_ANGLE_MIN - 1e-9)
+
+  def test_either_end_of_the_signal_is_reached_without_passing_it(self):
+    """In openpilot's sign path angle may reach 0.5 rad to the left and 0.5235 to the right, the signal mirrored (it is
+    sent negated). A rate-limited step (0.055 rad at a crawl) from anywhere short of where saturation holds it (0.9 of
+    either end) stops at that end exactly, never past it."""
+    for direction, limit, starts in ((1, -FORD_DBC_PATH_ANGLE_MIN, (0.40, 0.44, 0.4475, 0.449)),
+                                     (-1, FORD_DBC_PATH_ANGLE_MAX, (0.40, 0.44, 0.4475, 0.47))):
+      for start in starts:
+        with self.subTest(direction=direction, start=start):
+          ctrl = LateralAngleExt(*angle_params())
+          ctrl.path_angle_last = direction * start
+          res = self._drive(ctrl, 1, direction * 0.3, 4.0)   # a crawl and a tight turn: far past the signal
+          self.assertAlmostEqual(res.path_angle, direction * min(start + 0.055, limit), places=9)
 
   def test_gentle_curves_are_unchanged(self):
     """The clamp only ever bound past 0.02 1/m, so nothing below it may move."""

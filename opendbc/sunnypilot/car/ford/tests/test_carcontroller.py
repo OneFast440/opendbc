@@ -88,6 +88,24 @@ class TestFordCarControllerLateral(unittest.TestCase):
           self.assertEqual(sig['path_offset'], INACTIVE_PATH_OFFSET)
           self.assertNotEqual(sig['path_angle'], INACTIVE_PATH_ANGLE)
 
+  def test_angle_mode_path_angle_never_wraps_on_the_wire(self):
+    """path_angle is sent negated (Ford's sign). From just short of where saturation holds it, one more rate-limited
+    step toward either end must reach the panda as exactly the command with Ford's sign, inside the signal: a left
+    command past 0.5 rad used to wrap to a right one."""
+    for platform in PLATFORMS:
+      for direction, start in ((1, 0.4475), (-1, 0.47)):
+        with self.subTest(platform=platform, direction=direction):
+          controller, CP = make_car_controller(platform, mode=PrimaryLateralControl.angle)
+          addr = steer_addr(CP)
+          cc, cs = make_cc(curvature=direction * 0.3), make_cs(v_ego=4.0)
+          drive(controller, CP, frames=5, cc=cc, cs=cs)
+          controller.lat_angle.path_angle_last = direction * start
+          sends = drive(controller, CP, frames=5, cc=cc, cs=cs)
+          sent = [unpack_lat_ctl(addr, dat)['path_angle'] - INACTIVE_PATH_ANGLE for _, dat, _ in msgs(sends, addr)]
+          self.assertEqual(len(sent), 1)
+          self.assertEqual(sent[0], round(-controller.lat_angle.path_angle_last * 2000))
+          self.assertTrue(-1000 <= sent[0] <= 1047, sent[0])
+
   def test_curvature_mode_sends_curvature_and_trim(self):
     for platform in PLATFORMS:
       with self.subTest(platform=platform):
